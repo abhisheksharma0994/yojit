@@ -1,0 +1,99 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  schedule:
+    # Daily real end-to-end smoke test (see the e2e job below). This trigger
+    # applies to the whole workflow, but the e2e job is the only one gated to
+    # actually run on it -- the fast unit-test job below explicitly skips
+    # schedule/dispatch runs so it doesn't duplicate on push/PR.
+    - cron: "0 6 * * *"  # 06:00 UTC daily
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    # Fast unit tests: every push and PR, not on the daily schedule (that's
+    # what the e2e job below is for).
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu-latest exercises the Linux code paths (specs.py's /proc/meminfo
+        # branch); macos-latest is a real Apple Silicon (arm64) GitHub-hosted
+        # runner, exercising the sysctl/darwin branches. Both are free for
+        # public repos regardless of OS multiplier.
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package with dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run unit tests
+        run: pytest -v
+
+  e2e:
+    # Real end-to-end smoke test: downloads an actual (tiny) model, starts a
+    # real mlx_lm.server, and verifies opencode gets a real, non-empty reply
+    # through it -- via opencode's non-interactive `run` mode, which is
+    # scriptable (unlike its default full-screen TUI). This is deliberately
+    # NOT part of the fast unit-test job: it needs real network + real Metal
+    # compute, so it only runs on the daily schedule or a manual trigger,
+    # never on every push/PR.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest  # real Apple Silicon required for MLX
+    timeout-minutes: 20
+    env:
+      YOJIT_HOME: ${{ github.workspace }}/.e2e-models
+      TEST_MODEL: mlx-community/LFM2.5-1.2B-Instruct-4bit
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install yojit and mlx-lm
+        run: |
+          pip install -e .
+          pip install mlx-lm
+
+      - name: Install opencode
+        run: brew install anomalyco/tap/opencode
+
+      - name: Install a tiny real model (~0.6GB, kept small for CI speed)
+        run: yojit install "$TEST_MODEL"
+
+      - name: Serve it (real launch + real warm-up verification)
+        run: yojit serve --no-open
+
+      - name: Ask opencode to say hi and verify a real, non-empty reply
+        run: |
+          RESPONSE=$(opencode run "Say hi in one word." -m "local/$TEST_MODEL" --format json)
+          echo "$RESPONSE"
+          echo "$RESPONSE" | python3 -c "
+          import json, sys
+          content = ''
+          for line in sys.stdin:
+              line = line.strip()
+              if not line:
+                  continue
+              event = json.loads(line)
+              if event.get('type') == 'text':
+                  content += event['part'].get('text', '')
+          if not content.strip():
+              print('E2E FAILED: opencode produced no text content')
+              sys.exit(1)
+          print('E2E PASSED, reply:', content.strip())
+          "
+
+      - name: Stop the server
+        if: always()
+        run: yojit stop || true

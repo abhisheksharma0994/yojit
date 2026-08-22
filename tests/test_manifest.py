@@ -1,0 +1,93 @@
+import pytest
+
+from yojit import manifest
+
+
+def test_models_root_respects_env_override(models_root):
+    assert manifest.models_root() == models_root
+
+
+def test_models_root_defaults_to_repo_local_models_dir_in_a_dev_checkout(monkeypatch):
+    """No env var set: if this package is running from a real source
+    checkout (pyproject.toml present), models_root must resolve to
+    <repo>/models -- never silently fall back anywhere else."""
+    monkeypatch.delenv(manifest.MODELS_ROOT_ENV_VAR, raising=False)
+    repo_root = manifest._repo_root_if_dev_checkout()
+    assert repo_root is not None, "this test must itself run from a dev checkout"
+    assert manifest.models_root() == repo_root / "models"
+
+
+def test_models_root_raises_a_clear_error_when_not_a_dev_checkout_and_no_override(monkeypatch):
+    """Simulates a real pip/pipx install of a built package: no repo folder
+    exists at runtime. There must be NO silent fallback location -- just a
+    clear, actionable error telling the user to set the env var."""
+    monkeypatch.delenv(manifest.MODELS_ROOT_ENV_VAR, raising=False)
+    monkeypatch.setattr(manifest, "_repo_root_if_dev_checkout", lambda: None)
+    with pytest.raises(RuntimeError, match=manifest.MODELS_ROOT_ENV_VAR):
+        manifest.models_root()
+
+
+def test_load_on_missing_manifest_returns_empty_shape(models_root):
+    data = manifest.load()
+    assert data == {"schema_version": 1, "default_model": None, "models": {}}
+
+
+def test_add_model_creates_manifest_and_sets_default(models_root):
+    manifest.add_model("org/model-a", {"backend": "mlx", "store_path": "store/mlx/a", "size_gb": 5.0})
+    data = manifest.load()
+    assert "org/model-a" in data["models"]
+    assert data["default_model"] == "org/model-a"
+    # add_model must fill in defaults for fields callers don't provide
+    assert "added_at" in data["models"]["org/model-a"]
+    assert data["models"]["org/model-a"]["verified"] is False
+
+
+def test_add_model_does_not_override_existing_default(models_root):
+    manifest.add_model("org/model-a", {"backend": "mlx", "store_path": "store/mlx/a"})
+    manifest.add_model("org/model-b", {"backend": "mlx", "store_path": "store/mlx/b"})
+    assert manifest.get_default() == "org/model-a"
+
+
+def test_remove_model_reassigns_default_to_a_survivor(models_root):
+    manifest.add_model("org/model-a", {"backend": "mlx", "store_path": "store/mlx/a"})
+    manifest.add_model("org/model-b", {"backend": "mlx", "store_path": "store/mlx/b"})
+    manifest.remove_model("org/model-a")
+    assert manifest.get_default() == "org/model-b"
+    assert manifest.get_model("org/model-a") is None
+
+
+def test_remove_model_clears_default_when_no_models_remain(models_root):
+    manifest.add_model("org/model-a", {"backend": "mlx", "store_path": "store/mlx/a"})
+    manifest.remove_model("org/model-a")
+    assert manifest.get_default() is None
+    assert manifest.list_models() == {}
+
+
+def test_remove_nonexistent_model_is_a_safe_noop(models_root):
+    manifest.add_model("org/model-a", {"backend": "mlx", "store_path": "store/mlx/a"})
+    entry = manifest.remove_model("org/does-not-exist")
+    assert entry is None
+    assert manifest.get_default() == "org/model-a"  # untouched
+
+
+def test_set_default_rejects_uninstalled_model(models_root):
+    manifest.add_model("org/model-a", {"backend": "mlx", "store_path": "store/mlx/a"})
+    try:
+        manifest.set_default("org/not-installed")
+        assert False, "expected KeyError"
+    except KeyError:
+        pass
+
+
+def test_set_default_switches_between_installed_models(models_root):
+    manifest.add_model("org/model-a", {"backend": "mlx", "store_path": "store/mlx/a"})
+    manifest.add_model("org/model-b", {"backend": "mlx", "store_path": "store/mlx/b"})
+    manifest.set_default("org/model-b")
+    assert manifest.get_default() == "org/model-b"
+
+
+def test_manifest_survives_corrupt_json_by_returning_empty_shape(models_root):
+    manifest.models_root().mkdir(parents=True, exist_ok=True)
+    manifest.manifest_path().write_text("{not valid json")
+    data = manifest.load()
+    assert data == {"schema_version": 1, "default_model": None, "models": {}}

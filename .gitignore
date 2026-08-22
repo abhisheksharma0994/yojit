@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+.DS_Store
+.pytest_cache/
+.mypy_cache/
+*.log
+
+# Downloaded model weights + manifest live here for dev checkouts (see
+# manifest.py's models_root()) -- multi-GB binary files, never push these.
+models/*
+!models/.gitkeep
