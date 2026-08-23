@@ -74,9 +74,24 @@ jobs:
       - name: Serve it (real launch + real warm-up verification)
         run: yojit serve --no-open
 
+      - name: Configure opencode to use local yojit server
+        run: |
+          mkdir -p ~/.config/opencode
+          cat > ~/.config/opencode/opencode.json << 'EOF'
+          {
+            "providers": {
+              "local": {
+                "type": "mlx-server",
+                "host": "http://localhost:8080"
+              }
+            },
+            "default_model": "local/MLF2.5-1.2B-Instruct-4bit"
+          }
+          EOF
+
       - name: Ask opencode to say hi and verify a real, non-empty reply
         run: |
-          RESPONSE=$(opencode run "Say hi in one word." -m "local/$TEST_MODEL" --format json)
+          RESPONSE=$(opencode run "Say hi in one word." -m "local/MLF2.5-1.2B-Instruct-4bit" --format json)
           echo "$RESPONSE"
           echo "$RESPONSE" | python3 -c "
           import json, sys
