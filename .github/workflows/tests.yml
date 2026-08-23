@@ -69,7 +69,16 @@ jobs:
         run: brew install anomalyco/tap/opencode
 
       - name: Install a tiny real model (~0.6GB, kept small for CI speed)
-        run: yojit install "$TEST_MODEL"
+        run: |
+          yojit install "$TEST_MODEL"
+          ls -la "$YOJIT_HOME/models/"
+          ls -la "$YOJIT_HOME/models/$(basename $TEST_MODEL)" 2>/dev/null || echo "Model not in expected location"
+
+      - name: Verify model is accessible
+        run: |
+          echo "Testing if model files exist..."
+          ls -la "$YOJIT_HOME/models/"
+          ls -la "$YOJIT_HOME/models/$(basename $TEST_MODEL)/*.safetensors" 2>/dev/null || echo "No safetensors found"
 
       - name: Serve it (real launch + real warm-up verification)
         run: yojit serve --no-open
