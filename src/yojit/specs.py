@@ -1,4 +1,5 @@
 """Hardware detection: RAM, chip, disk space, platform, CPU cores."""
+import builtins
 import os
 import platform
 import shutil
@@ -43,7 +44,7 @@ def total_ram_gb() -> float:
             out = subprocess.check_output(["sysctl", "-n", "hw.memsize"]).decode().strip()
             return int(out) / (1024 ** 3)
         if system == "Linux":
-            with open("/proc/meminfo") as f:
+            with builtins.open("/proc/meminfo") as f:
                 for line in f:
                     if line.startswith("MemTotal:"):
                         kb = int(line.split()[1])
