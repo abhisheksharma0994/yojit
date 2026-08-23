@@ -71,14 +71,14 @@ jobs:
       - name: Install a tiny real model (~0.6GB, kept small for CI speed)
         run: |
           yojit install "$TEST_MODEL"
-          ls -la "$YOJIT_HOME/models/"
-          ls -la "$YOJIT_HOME/models/$(basename $TEST_MODEL)" 2>/dev/null || echo "Model not in expected location"
+          ls -la "$YOJIT_HOME/store/mlx/"
+          ls -la "$YOJIT_HOME/store/mlx/${TEST_MODEL//\//__}" 2>/dev/null || echo "Model not in expected location"
 
       - name: Verify model is accessible
         run: |
           echo "Testing if model files exist..."
-          ls -la "$YOJIT_HOME/models/"
-          ls -la "$YOJIT_HOME/models/$(basename $TEST_MODEL)/*.safetensors" 2>/dev/null || echo "No safetensors found"
+          ls -la "$YOJIT_HOME/store/mlx/"
+          ls -la "$YOJIT_HOME/store/mlx/${TEST_MODEL//\//__}"/*.safetensors 2>/dev/null || echo "No safetensors found"
 
       - name: Serve it (real launch + real warm-up verification)
         run: yojit serve --no-open
@@ -86,7 +86,7 @@ jobs:
       - name: Configure opencode to use local yojit server
         run: |
           mkdir -p ~/.config/opencode
-          cat > ~/.config/opencode/opencode.json << 'EOF'
+          cat > ~/.config/opencode/opencode.json << EOF
           {
             "providers": {
               "local": {
