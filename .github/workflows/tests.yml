@@ -94,6 +94,9 @@ jobs:
           echo "=== Running opencode ==="
           opencode run "Say hi in one word." -m "local/$TEST_MODEL" --format json 2>&1 || echo "opencode failed"
           echo "=== opencode output above ==="
+          echo "=== Testing direct curl to server ==="
+          curl -s http://localhost:8080/v1/chat/completions -H "Content-Type: application/json" -d '{"model": "mlx-community/LFM2.5-1.2B-Instruct-4bit", "messages": [{"role": "user", "content": "hi"}], "stream": false}' 2>&1 || echo "curl failed"
+          echo "=== curl output above ==="
 
       - name: Stop the server
         if: always()
