@@ -68,6 +68,16 @@ jobs:
       - name: Install opencode
         run: brew install anomalyco/tap/opencode
 
+      - name: Seed opencode.json so install-time sync actually writes to it
+        # opencode_sync.sync() (called by `yojit install` below) is a no-op
+        # if opencode.json doesn't exist yet, and a fresh opencode install
+        # doesn't create one on its own -- so without this, the "local"
+        # provider block never gets written and every later step that
+        # talks to opencode has nothing to work with.
+        run: |
+          mkdir -p ~/.config/opencode
+          echo '{}' > ~/.config/opencode/opencode.json
+
       - name: Install a tiny real model (~0.6GB, kept small for CI speed)
         run: |
           yojit install "$TEST_MODEL"
@@ -83,29 +93,38 @@ jobs:
       - name: Serve it (real launch + real warm-up verification)
         run: yojit serve --no-open
 
-      - name: Configure opencode to use local yojit server
+      - name: Verify opencode.json was synced with the local provider
         run: |
-          mkdir -p ~/.config/opencode
-          cat > ~/.config/opencode/opencode.json << EOF
-          {
-            "providers": {
-              "local": {
-                "type": "mlx-server",
-                "host": "http://localhost:8080"
-              }
-            },
-            "default_model": "local/$TEST_MODEL"
-          }
-          EOF
+          echo "=== opencode.json after install/serve ==="
+          cat ~/.config/opencode/opencode.json
+          echo "=== end opencode.json ==="
+          MODEL_PATH="$YOJIT_HOME/$(jq -r --arg id "$TEST_MODEL" '.models[$id].store_path' "$YOJIT_HOME/manifest.json")"
+          echo "MODEL_PATH=$MODEL_PATH" >> "$GITHUB_ENV"
+          jq -e --arg key "$MODEL_PATH" '.provider.local.models[$key]' ~/.config/opencode/opencode.json
 
       - name: Ask opencode to say hi and verify a real, non-empty reply
         run: |
           echo "=== Running opencode ==="
-          opencode run "Say hi in one word." -m "local/$TEST_MODEL" --format json 2>&1 || echo "opencode failed"
+          OUT=$(opencode run "Say hi in one word." -m "local/$MODEL_PATH" --format json)
+          echo "$OUT"
           echo "=== opencode output above ==="
+          # --format json is JSONL (one event object per line), documented
+          # event types include "error" and "text" (with the reply text at
+          # .part.text). Fail the job (not just log) if we saw an explicit
+          # error event, or never saw a non-empty text event -- either means
+          # the request never produced a real completion through the server.
+          if echo "$OUT" | jq -es 'any(.[]; .type == "error")'; then
+            echo "opencode reported an error event" >&2
+            exit 1
+          fi
+          echo "$OUT" | jq -es '[.[] | select(.type == "text") | .part.text] | join("") | select(length > 0)' > /dev/null
+
           echo "=== Testing direct curl to server ==="
-          curl -s http://localhost:8080/v1/chat/completions -H "Content-Type: application/json" -d '{"model": "mlx-community/LFM2.5-1.2B-Instruct-4bit", "messages": [{"role": "user", "content": "hi"}], "stream": false}' 2>&1 || echo "curl failed"
+          CURL_OUT=$(curl -sf http://localhost:8080/v1/chat/completions -H "Content-Type: application/json" \
+            -d "$(jq -n --arg m "$MODEL_PATH" '{model: $m, messages: [{role: "user", content: "hi"}], stream: false}")")
+          echo "$CURL_OUT"
           echo "=== curl output above ==="
+          echo "$CURL_OUT" | jq -e '.choices[0].message.content | select(length > 0)' > /dev/null
 
       - name: Stop the server
         if: always()
