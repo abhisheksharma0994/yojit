@@ -113,7 +113,7 @@ jobs:
           # .part.text). Fail the job (not just log) if we saw an explicit
           # error event, or never saw a non-empty text event -- either means
           # the request never produced a real completion through the server.
-          if echo "$OUT" | jq -es 'any(.[]; .type == "error")'; then
+          if echo "$OUT" | jq -es 'any(.[]; .type == "error")' > /dev/null; then
             echo "opencode reported an error event" >&2
             exit 1
           fi
@@ -121,7 +121,7 @@ jobs:
 
           echo "=== Testing direct curl to server ==="
           CURL_OUT=$(curl -sf http://localhost:8080/v1/chat/completions -H "Content-Type: application/json" \
-            -d "$(jq -n --arg m "$MODEL_PATH" '{model: $m, messages: [{role: "user", content: "hi"}], stream: false}")")
+            -d "$(jq -n --arg m "$MODEL_PATH" '{model: $m, messages: [{role: "user", content: "hi"}], stream: false}')")
           echo "$CURL_OUT"
           echo "=== curl output above ==="
           echo "$CURL_OUT" | jq -e '.choices[0].message.content | select(length > 0)' > /dev/null
