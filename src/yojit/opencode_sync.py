@@ -43,7 +43,20 @@ def sync(running_model: str | None = None) -> str:
         label = model_id
         if running_model and model_id == running_model:
             label = f"{model_id} (running)"
-        models_obj[model_id] = {
+        # Keyed by the exact local path the backend launches with (see
+        # server.py's _attempt_launch), NOT the manifest's HF-repo-style
+        # model_id -- mlx_lm.server matches the "model" field of every
+        # request against a plain string equality check with whatever was
+        # passed to --model at launch (ModelProvider.load in mlx_lm/server.py
+        # only special-cases the literal sentinel "default_model", nothing
+        # else). Keying by model_id here silently broke every actual chat
+        # request from opencode: the mismatched string made mlx_lm.server
+        # treat each request as "load a different model", which tries to
+        # resolve model_id as a fresh HF Hub repo -- hanging when online,
+        # failing outright when offline. The "name" field still shows the
+        # friendly repo-style label in opencode's picker.
+        key = str(manifest.models_root() / entry["store_path"])
+        models_obj[key] = {
             "name": f"{label} ({entry.get('backend', 'local')})",
             "limit": {
                 "context": entry.get("context", 4096),

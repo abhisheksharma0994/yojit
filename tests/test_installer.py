@@ -38,7 +38,11 @@ def test_install_mlx_writes_manifest_entry_and_syncs(models_root, opencode_confi
     # discovery + opencode sync side effects must have run
     assert (manifest.models_root() / "low" / "mlx").exists() or (manifest.models_root() / "medium" / "mlx").exists()
     config = json.loads(opencode_config.read_text())
-    assert "org/fake-model-4bit" in config["provider"]["local"]["models"]
+    # Keyed by the local path the backend actually launches with, not the
+    # HF-repo-style model_id -- see opencode_sync.py's comment.
+    key = str(manifest.models_root() / entry["store_path"])
+    assert key in config["provider"]["local"]["models"]
+    assert "org/fake-model-4bit" in config["provider"]["local"]["models"][key]["name"]
 
 
 def test_install_mlx_with_subfolder_uses_composite_model_id(models_root, opencode_config, mocker):

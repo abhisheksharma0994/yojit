@@ -1,8 +1,9 @@
+import json
 import os
 
 import pytest
 
-from yojit import manifest, server
+from yojit import manifest, opencode_sync, server
 
 
 class FakeBackend:
@@ -34,6 +35,57 @@ class FakeBackend:
 
     def warm_up(self, port, model_id):
         self.warm_up_called = True
+
+
+# --- opencode.json <-> backend launch contract -----------------------------
+
+def test_opencode_json_model_key_matches_what_the_backend_was_launched_with(
+    models_root, opencode_config, monkeypatch
+):
+    """Regression for a real bug: opencode.json used to be keyed by the
+    manifest's HF-repo-style model_id, while the backend was launched with a
+    local filesystem path -- two different strings that were supposed to
+    refer to the same running model but never matched. mlx_lm.server matches
+    each request's "model" field against exactly what it was launched with
+    (plain string equality, no alias resolution beyond one internal
+    sentinel), so every chat request from opencode silently looked like "load
+    a different model" and tried to resolve model_id as a fresh Hugging Face
+    repo -- hanging when online, failing outright when offline. Neither
+    test_opencode_sync.py (tests sync() in isolation) nor the rest of this
+    file (tests serve()'s orchestration logic) ever cross-checked the two
+    against each other, so the mismatch shipped silently. This test exists
+    specifically to close that gap: it asserts equality between the two
+    live values, not two independently-hardcoded expectations that could
+    both be wrong the same way."""
+    manifest.add_model("org/model-a", {"backend": "mlx", "store_path": "store/mlx/a", "tier": "low"})
+    fake = FakeBackend(health_sequence=[True])
+    monkeypatch.setattr(server, "get_backend", lambda name: fake)
+    monkeypatch.setattr(server, "_free_port", lambda port: None)
+
+    server.serve("org/model-a", open_opencode=False)
+
+    launched_model_path = str(fake.launch_called_with[0])
+    config = json.loads(opencode_config.read_text())
+    opencode_keys = list(config["provider"]["local"]["models"].keys())
+
+    assert launched_model_path in opencode_keys, (
+        f"backend was launched with {launched_model_path!r} but opencode.json's "
+        f"model keys are {opencode_keys!r} -- opencode would send a 'model' "
+        f"field the running server doesn't recognize"
+    )
+
+
+def test_opencode_sync_key_format_matches_backends_model_path_computation(models_root, opencode_config):
+    """Narrower unit-level version of the same contract, independent of
+    serve()'s orchestration: opencode_sync.py must key by exactly
+    manifest.models_root() / entry["store_path"] -- the same expression
+    backends/mlx.py and backends/llamacpp.py use for their --model
+    argument (see backends/mlx.py:33, backends/llamacpp.py:38)."""
+    manifest.add_model("org/model-a", {"backend": "mlx", "store_path": "store/mlx/a", "tier": "low"})
+    opencode_sync.sync()
+    config = json.loads(opencode_config.read_text())
+    expected_key = str(manifest.models_root() / "store/mlx/a")
+    assert expected_key in config["provider"]["local"]["models"]
 
 
 # --- offline-by-default posture -------------------------------------------

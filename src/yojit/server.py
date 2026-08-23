@@ -117,9 +117,21 @@ def _attempt_launch(model_id: str) -> tuple[bool, int | None]:
     backend.ensure_installed()
     model_path = manifest.models_root() / entry["store_path"]
 
-    print("Checking internet connectivity...")
-    online = apply_offline_posture()
-    print("  -> Internet reachable." if online else "  -> No internet detected. Running fully offline from local cache.")
+    # Always offline here, unconditionally -- this is the serve path for a
+    # model manifest.get_model() just confirmed is already installed, so
+    # there is nothing to gain from letting the backend go online. Doing so
+    # used to be actively harmful: mlx_lm.server's tokenizer/config loading
+    # (via transformers) re-validates the local snapshot against HF Hub on
+    # every launch when online, regardless of whether the model uses custom
+    # remote code -- reproduced live, and it can hang indefinitely on a slow
+    # or flaky connection instead of just using what's already on disk.
+    # apply_offline_posture() (the reachability-gated version) is no longer
+    # called from anywhere in this flow -- it's kept as a tested utility in
+    # case a future codepath (e.g. a "verify/refresh" command) legitimately
+    # needs a reachability-gated online mode, not because the install path
+    # uses it (it doesn't -- installer.py calls snapshot_download directly).
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    print("Running fully offline from local cache (model is already installed).")
 
     _free_port(PORT)
 
@@ -213,5 +225,10 @@ def serve(model_id: str | None, open_opencode: bool = True) -> None:
     print("Launching opencode...\n")
     # Bind opencode's session to the exact model just started -- otherwise it
     # defaults to whatever model was last used in a previous session, which
-    # is very likely NOT the one actually running right now.
-    subprocess.run(["opencode", "-m", f"{OPENCODE_PROVIDER}/{model_id}"])
+    # is very likely NOT the one actually running right now. Must match the
+    # exact key opencode_sync.py just wrote into opencode.json's model list
+    # (the local path, not the manifest's HF-repo-style model_id -- see that
+    # file's comment) or opencode can't resolve "-m" to a configured model at
+    # all and fails to connect.
+    local_path = str(manifest.models_root() / entry["store_path"])
+    subprocess.run(["opencode", "-m", f"{OPENCODE_PROVIDER}/{local_path}"])

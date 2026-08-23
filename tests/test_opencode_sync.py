@@ -19,15 +19,21 @@ def test_sync_writes_local_provider_with_installed_models(models_root, opencode_
     assert "local" in config["provider"]
     assert config["provider"]["local"]["options"]["baseURL"] == f"http://localhost:{opencode_sync.PORT}/v1"
     models = config["provider"]["local"]["models"]
-    assert "org/model-a" in models
-    assert models["org/model-a"]["limit"] == {"context": 8192, "output": 2048}
+    # Keyed by the exact local path the backend launches with (matches
+    # mlx_lm.server's plain string-equality model matching), not the
+    # manifest's HF-repo-style model_id -- see opencode_sync.py's comment.
+    key = str(manifest.models_root() / "store/mlx/a")
+    assert key in models
+    assert "org/model-a" in models[key]["name"]
+    assert models[key]["limit"] == {"context": 8192, "output": 2048}
 
 
 def test_sync_marks_the_running_model(models_root, opencode_config):
     manifest.add_model("org/model-a", {"backend": "mlx", "store_path": "store/mlx/a"})
     opencode_sync.sync(running_model="org/model-a")
     config = json.loads(opencode_config.read_text())
-    assert "(running)" in config["provider"]["local"]["models"]["org/model-a"]["name"]
+    key = str(manifest.models_root() / "store/mlx/a")
+    assert "(running)" in config["provider"]["local"]["models"][key]["name"]
 
 
 def test_sync_fully_replaces_model_list_dropping_removed_models(models_root, opencode_config):
@@ -37,7 +43,8 @@ def test_sync_fully_replaces_model_list_dropping_removed_models(models_root, ope
     manifest.add_model("org/model-a", {"backend": "mlx", "store_path": "store/mlx/a"})
     opencode_sync.sync()
     config = json.loads(opencode_config.read_text())
-    assert "org/model-a" in config["provider"]["local"]["models"]
+    key = str(manifest.models_root() / "store/mlx/a")
+    assert key in config["provider"]["local"]["models"]
 
     manifest.remove_model("org/model-a")
     opencode_sync.sync()

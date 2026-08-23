@@ -13,3 +13,6 @@ dist/
 # manifest.py's models_root()) -- multi-GB binary files, never push these.
 models/*
 !models/.gitkeep
+
+# Archived (out-of-rotation) model weights, moved aside but kept on disk
+models/archive/
