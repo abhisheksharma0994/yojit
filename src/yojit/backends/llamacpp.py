@@ -3,6 +3,7 @@ from this machine's actual specs (see classify.compute_launch_tuning).
 """
 import shutil
 import subprocess
+from http import HTTPStatus
 from pathlib import Path
 
 import requests
@@ -52,7 +53,7 @@ class LlamaCppBackend(Backend):
     def health_check(self, port: int) -> bool:
         try:
             r = requests.get(f"http://localhost:{port}/v1/models", timeout=2)
-            return r.status_code == 200
+            return r.status_code == HTTPStatus.OK
         except Exception:
             return False
 

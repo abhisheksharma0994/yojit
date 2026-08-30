@@ -2,6 +2,7 @@
 MLX-format model -- vision or plain text, dense or MoE.
 """
 import subprocess
+from http import HTTPStatus
 from pathlib import Path
 
 import requests
@@ -55,7 +56,7 @@ class MLXVLMBackend(Backend):
     def health_check(self, port: int) -> bool:
         try:
             r = requests.get(f"http://localhost:{port}/v1/models", timeout=2)
-            return r.status_code == 200
+            return r.status_code == HTTPStatus.OK
         except Exception:
             return False
 

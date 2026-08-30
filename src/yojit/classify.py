@@ -8,6 +8,7 @@ MIN_CONTEXT = 4096
 MAX_CONTEXT_HARD_CAP = 65536
 MAX_OUTPUT_HARD_CAP = 4096
 MIN_OUTPUT = 1024
+CONTEXT_ROUND_TO = 4096
 
 # Fraction of total RAM consumed by weights alone. Empirically, models above
 # ~50% of RAM risk a Metal OOM crash regardless of context size.
@@ -100,8 +101,8 @@ def estimate_limits_from_config(cfg: dict, weight_gb: float, ram_gb: float):
 
     # Memory floor never overrides the model's own native context ceiling.
     context = min(native_ctx, MAX_CONTEXT_HARD_CAP, max(MIN_CONTEXT, max_ctx_by_mem))
-    if context >= 4096:
-        context = (context // 4096) * 4096
+    if context >= CONTEXT_ROUND_TO:
+        context = (context // CONTEXT_ROUND_TO) * CONTEXT_ROUND_TO
 
     output = max(MIN_OUTPUT, min(context // 4, MAX_OUTPUT_HARD_CAP))
     return int(context), int(output)
@@ -126,7 +127,7 @@ def default_kv_cache_overrides(cfg: dict, backend_name: str, weight_gb: float, r
         bytes_per_token = bytes_per_token_fp16 * (bits / 16)
         fits = bytes_per_token <= 0 or context * bytes_per_token <= headroom_bytes
         if fits or bits == _KV_QUANT_BIT_OPTIONS[-1]:
-            if bits == 16:
+            if bits == _KV_QUANT_BIT_OPTIONS[0]:
                 return {}
             if backend_name == "llamacpp":
                 return {"kv_cache_quant": _LLAMACPP_CACHE_TYPE_BY_BITS.get(bits, "q4_0")}

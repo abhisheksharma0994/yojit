@@ -40,8 +40,12 @@ line-length = 120
 target-version = "py39"
 
 [tool.ruff.lint]
-# pycodestyle, pyflakes, import sort, pyupgrade, mccabe complexity, pylint-refactor
-select = ["E", "F", "I", "UP", "C90", "PLR0911", "PLR0912", "PLR0913", "PLR0915"]
+# pycodestyle, pyflakes, import sort, pyupgrade, mccabe complexity, full pylint-refactor (OOP/design smells)
+select = ["E", "F", "I", "UP", "C90", "PLR"]
+
+[tool.ruff.lint.per-file-ignores]
+# Magic-value literals are normal and expected in test assertions.
+"tests/*" = ["PLR2004"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10
