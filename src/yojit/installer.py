@@ -12,7 +12,7 @@ def _safe_name(repo_id: str) -> str:
 
 
 def install_mlx(repo_id: str, subfolder: str | None, ram_gb: float) -> str:
-    root = manifest.store_root() / "mlx"
+    root = manifest.store_root() / "mlx_vlm"
     root.mkdir(parents=True, exist_ok=True)
     dest_name = _safe_name(repo_id) if not subfolder else f"{_safe_name(repo_id)}__{subfolder}"
     dest = root / dest_name

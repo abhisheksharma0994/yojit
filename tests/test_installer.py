@@ -30,13 +30,14 @@ def test_install_mlx_writes_manifest_entry_and_syncs(models_root, opencode_confi
     assert "Installed org/fake-model-4bit" in result
     entry = manifest.get_model("org/fake-model-4bit")
     assert entry is not None
-    # mlx_vlm, not mlx: verified live to serve plain text-only models
-    # correctly too, plus it's the only one with real KV-cache-quant/
-    # context-enforcement flags -- see backends/mlx_vlm.py's docstring.
     assert entry["backend"] == "mlx_vlm"
     assert entry["bits"] == 4  # parsed from the "-4bit" suffix
     assert entry["source_repo"] == "org/fake-model-4bit"
     assert entry["verified"] is False
+    # Regression: the manifest once said "mlx_vlm" while the real files
+    # still landed under store/mlx/ -- the physical directory name must
+    # match the backend name, not just the manifest field.
+    assert entry["store_path"].startswith("store/mlx_vlm/")
 
     # discovery + opencode sync side effects must have run
     assert ((manifest.models_root() / "low" / "mlx_vlm").exists()
