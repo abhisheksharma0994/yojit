@@ -20,10 +20,14 @@ class MLXVLMBackend(Backend):
         return (path / "config.json").exists() and any(path.glob("*.safetensors"))
 
     def ensure_installed(self) -> None:
-        if mlx_env.is_installed("mlx_vlm"):
+        # jinja2 isn't a hard dependency of mlx-vlm/transformers, but chat-template
+        # rendering fails at request time without it -- install it explicitly too.
+        missing = [pkg for pkg, mod in (("mlx-vlm", "mlx_vlm"), ("jinja2", "jinja2"))
+                   if not mlx_env.is_installed(mod)]
+        if not missing:
             return
-        print("mlx-vlm not found -- installing into yojit's isolated venv (~/.yojit/venv)...")
-        mlx_env.pip_install("mlx-vlm")
+        print(f"Installing {', '.join(missing)} into yojit's isolated venv (~/.yojit/venv)...")
+        mlx_env.pip_install(*missing)
 
     def launch(self, model_path: Path, port: int, context: int, output_limit: int, tuning: dict,
                overrides: dict | None = None):

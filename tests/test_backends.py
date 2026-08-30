@@ -153,18 +153,27 @@ def test_detect_backend_routes_text_only_model_to_mlx_vlm_too(tmp_path):
     assert backend is not None and backend.name == "mlx_vlm"
 
 
-def test_mlx_vlm_ensure_installed_skips_when_already_present(mocker):
+def test_mlx_vlm_ensure_installed_skips_when_both_present(mocker):
     mocker.patch.object(mlx_env, "is_installed", return_value=True)
     mock_pip_install = mocker.patch.object(mlx_env, "pip_install")
     MLXVLMBackend().ensure_installed()
     mock_pip_install.assert_not_called()
 
 
-def test_mlx_vlm_ensure_installed_installs_when_missing(mocker):
+def test_mlx_vlm_ensure_installed_installs_both_when_missing(mocker):
     mocker.patch.object(mlx_env, "is_installed", return_value=False)
     mock_pip_install = mocker.patch.object(mlx_env, "pip_install")
     MLXVLMBackend().ensure_installed()
-    mock_pip_install.assert_called_once_with("mlx-vlm")
+    mock_pip_install.assert_called_once_with("mlx-vlm", "jinja2")
+
+
+def test_mlx_vlm_ensure_installed_installs_only_the_missing_one(mocker):
+    """jinja2 isn't a hard dependency of mlx-vlm -- chat-template rendering
+    fails at request time without it, so it needs its own presence check."""
+    mocker.patch.object(mlx_env, "is_installed", side_effect=lambda mod: mod == "mlx_vlm")
+    mock_pip_install = mocker.patch.object(mlx_env, "pip_install")
+    MLXVLMBackend().ensure_installed()
+    mock_pip_install.assert_called_once_with("jinja2")
 
 
 def test_mlx_vlm_health_check_true_on_200(mocker):
