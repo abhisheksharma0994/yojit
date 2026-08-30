@@ -12,9 +12,20 @@ def test_search_builds_expected_params_and_returns_json(mocker):
     mock_response.raise_for_status.assert_called_once()
     args, kwargs = mock_get.call_args
     assert args[0] == hf_explore.API
-    assert kwargs["params"]["search"] == "qwen"
-    assert kwargs["params"]["author"] == hf_explore.DEFAULT_AUTHOR
-    assert kwargs["params"]["limit"] == 10
+    assert kwargs["params"] == {
+        "sort": "downloads", "direction": "-1", "limit": 10, "author": hf_explore.DEFAULT_AUTHOR, "search": "qwen",
+    }
+    assert kwargs["timeout"] == 15
+
+
+def test_search_uses_documented_default_limit_when_unspecified(mocker):
+    mock_response = mocker.Mock()
+    mock_response.json.return_value = []
+    mock_get = mocker.patch("yojit.hf_explore.requests.get", return_value=mock_response)
+
+    hf_explore.search()
+
+    assert mock_get.call_args.kwargs["params"]["limit"] == 50
 
 
 def test_search_omits_author_when_explicitly_none(mocker):
@@ -53,6 +64,12 @@ def test_detect_backend_from_files_recognizes_gguf_repo():
 def test_detect_backend_from_files_returns_none_for_unrecognized_repo():
     files = [{"path": "README.md"}, {"path": "config.yaml"}]
     assert hf_explore.detect_backend_from_files(files) is None
+
+
+def test_detect_backend_from_files_requires_both_safetensors_and_config_json():
+    """Neither file alone is enough evidence of an mlx repo."""
+    assert hf_explore.detect_backend_from_files([{"path": "model.safetensors"}]) is None
+    assert hf_explore.detect_backend_from_files([{"path": "config.json"}]) is None
 
 
 def test_detect_backend_prefers_mlx_when_repo_has_both_formats():
@@ -103,6 +120,13 @@ def test_pick_best_gguf_file_prefers_largest_that_still_fits_comfortably():
 
 def test_pick_best_gguf_file_returns_none_when_nothing_fits():
     files = [_gguf("model-Q8_0.gguf", 20.0)]
+    assert hf_explore.pick_best_gguf_file(files, ram_gb=24.0) is None
+
+
+def test_pick_best_gguf_file_excludes_high_tier_even_if_it_technically_fits_at_all():
+    """A file can fit in RAM at all yet still be too risky (high tier) --
+    both conditions must hold, not just one."""
+    files = [_gguf("model-Q6_K.gguf", 15.0)]  # 62.5% of RAM: fits_at_all True, but high tier
     assert hf_explore.pick_best_gguf_file(files, ram_gb=24.0) is None
 
 

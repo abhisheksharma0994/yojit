@@ -94,6 +94,22 @@ def test_rebuild_replaces_a_stale_regular_file_at_the_link_location(models_root)
     assert stale_path.resolve() == store_dir.resolve()
 
 
+def test_rebuild_replaces_a_dangling_symlink_at_the_link_location(models_root):
+    """A broken symlink reports exists()=False but is_symlink()=True --
+    both checks matter, not just one."""
+    store_dir = _make_fake_store_entry(models_root, "mlx_vlm", "org__model-a")
+    manifest.add_model("org/model-a", {
+        "backend": "mlx_vlm", "store_path": f"store/mlx_vlm/{store_dir.name}", "tier": "low",
+    })
+    stale_path = manifest.models_root() / "low" / "mlx_vlm" / store_dir.name
+    stale_path.parent.mkdir(parents=True, exist_ok=True)
+    stale_path.symlink_to(manifest.models_root() / "nonexistent-target")
+
+    discovery.rebuild_tier_symlinks()
+
+    assert stale_path.resolve() == store_dir.resolve()
+
+
 def test_rebuild_tolerates_a_platform_that_cannot_create_symlinks(models_root, mocker):
     store_dir = _make_fake_store_entry(models_root, "mlx_vlm", "org__model-a")
     manifest.add_model("org/model-a", {

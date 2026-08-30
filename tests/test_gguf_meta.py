@@ -20,7 +20,18 @@ def test_to_hf_style_config_synthesizes_layer_types_from_full_attention_interval
     assert len(cfg["layer_types"]) == 65
     full_count = sum(1 for lt in cfg["layer_types"] if lt == "full_attention")
     assert full_count == 16  # every 4th of 65 layers, not all 65
+    # exact positions matter, not just the count: layer index 3 (the 4th) is full, index 0/1/2 aren't
+    assert cfg["layer_types"][:4] == ["linear_attention", "linear_attention", "linear_attention", "full_attention"]
     assert cfg["head_dim"] == 256  # real declared value, not hidden_size/heads (5120/24 != 256)
+    assert cfg == {
+        "max_position_embeddings": 262144,
+        "num_hidden_layers": 65,
+        "layer_types": cfg["layer_types"],
+        "hidden_size": 5120,
+        "num_attention_heads": 24,
+        "num_key_value_heads": 4,
+        "head_dim": 256,
+    }
 
 
 def test_to_hf_style_config_omits_layer_types_when_not_a_hybrid_architecture():

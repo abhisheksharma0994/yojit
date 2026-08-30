@@ -35,6 +35,10 @@ def test_install_mlx_writes_manifest_entry_and_syncs(models_root, opencode_confi
     assert entry["source_repo"] == "org/fake-model-4bit"
     assert entry["verified"] is False
     assert entry["store_path"].startswith("store/mlx_vlm/")  # real dir must match the backend name
+    # no subfolder given: the store dir must be named from the repo id alone
+    assert entry["store_path"] == "store/mlx_vlm/org__fake-model-4bit"
+    assert set(entry) >= {"backend", "store_path", "bits", "size_gb", "tier", "context", "output",
+                           "source_repo", "verified"}
 
     # discovery + opencode sync side effects must have run
     assert ((manifest.models_root() / "low" / "mlx_vlm").exists()
@@ -56,6 +60,7 @@ def test_install_mlx_with_subfolder_uses_composite_model_id(models_root, opencod
     entry = manifest.get_model("org/multi-quant-repo:4-bit")
     assert entry is not None
     assert entry["store_path"].endswith("4-bit")
+    assert entry["bits"] == 4  # must be parsed from the subfolder name, not just the repo id
 
 
 def test_install_gguf_writes_manifest_entry(models_root, opencode_config, mocker, tmp_path):
@@ -77,6 +82,26 @@ def test_install_gguf_writes_manifest_entry(models_root, opencode_config, mocker
     entry = manifest.get_model("org/gguf-repo:Q4_K_M")
     assert entry is not None
     assert entry["backend"] == "llamacpp"
+    assert entry["quant"] == "Q4_K_M"
+    assert set(entry) >= {"backend", "store_path", "quant", "size_gb", "tier", "context", "output",
+                           "source_repo", "verified"}
+
+
+def test_install_gguf_quant_parsing_only_strips_the_final_extension(models_root, opencode_config, mocker):
+    """Regression: filenames can carry version dots before the .gguf extension --
+    only the last "." must be treated as the extension separator."""
+    def fake_hf_hub_download(repo_id, filename, local_dir):
+        from pathlib import Path
+        p = Path(local_dir) / filename
+        p.write_bytes(b"GGUF" + b"0" * 1024)
+        return str(p)
+
+    mocker.patch("huggingface_hub.hf_hub_download", side_effect=fake_hf_hub_download)
+
+    installer.install_gguf("org/gguf-repo", "model.v2-Q4_K_M.gguf", ram_gb=24.0)
+
+    entry = manifest.get_model("org/gguf-repo:Q4_K_M")
+    assert entry is not None
     assert entry["quant"] == "Q4_K_M"
 
 

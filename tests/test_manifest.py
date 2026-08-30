@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +18,12 @@ def test_models_root_defaults_to_repo_local_models_dir_in_a_dev_checkout(monkeyp
     repo_root = manifest._repo_root_if_dev_checkout()
     assert repo_root is not None, "this test must itself run from a dev checkout"
     assert manifest.models_root() == repo_root / "models"
+
+
+def test_repo_root_if_dev_checkout_resolves_two_levels_up_from_this_file():
+    """src/yojit/manifest.py -> parents[2] is the repo root (2 levels up)."""
+    expected = Path(manifest.__file__).resolve().parents[2]
+    assert manifest._repo_root_if_dev_checkout() == expected
 
 
 def test_models_root_raises_a_clear_error_when_not_a_dev_checkout_and_no_override(monkeypatch):
@@ -74,11 +81,8 @@ def test_remove_nonexistent_model_is_a_safe_noop(models_root):
 
 def test_set_default_rejects_uninstalled_model(models_root):
     manifest.add_model("org/model-a", {"backend": "mlx", "store_path": "store/mlx/a"})
-    try:
+    with pytest.raises(KeyError, match="org/not-installed"):
         manifest.set_default("org/not-installed")
-        assert False, "expected KeyError"
-    except KeyError:
-        pass
 
 
 def test_set_default_switches_between_installed_models(models_root):
@@ -96,11 +100,8 @@ def test_manifest_survives_corrupt_json_by_returning_empty_shape(models_root):
 
 
 def test_update_overrides_rejects_uninstalled_model(models_root):
-    try:
+    with pytest.raises(KeyError, match="org/not-installed"):
         manifest.update_overrides("org/not-installed", seed=42)
-        assert False, "expected KeyError"
-    except KeyError:
-        pass
 
 
 def test_update_overrides_writes_only_given_fields(models_root):
@@ -141,6 +142,46 @@ def test_load_migrates_a_retired_backend_name_transparently(models_root):
     data = manifest.load()
 
     assert data["models"]["org/old-model"]["backend"] == "mlx_vlm"
+
+
+def _write_manifest_without_models_key(models_root):
+    manifest.models_root().mkdir(parents=True, exist_ok=True)
+    manifest.manifest_path().write_text(json.dumps({"schema_version": 1, "default_model": None}))
+
+
+def test_load_tolerates_a_manifest_with_no_models_key_at_all(models_root):
+    _write_manifest_without_models_key(models_root)
+    manifest.load()  # must not raise while migrating retired backend names
+
+
+def test_get_model_and_list_models_default_to_empty_when_models_key_missing(models_root):
+    _write_manifest_without_models_key(models_root)
+    assert manifest.get_model("anything") is None
+    assert manifest.list_models() == {}
+
+
+def test_set_default_and_update_overrides_raise_key_error_when_models_key_missing(models_root):
+    _write_manifest_without_models_key(models_root)
+    with pytest.raises(KeyError):
+        manifest.set_default("org/model-a")
+    with pytest.raises(KeyError):
+        manifest.update_overrides("org/model-a", seed=1)
+
+
+def test_remove_model_is_a_safe_noop_when_models_key_missing(models_root):
+    _write_manifest_without_models_key(models_root)
+    assert manifest.remove_model("org/model-a") is None
+
+
+def test_add_model_creates_models_key_when_manifest_lacks_it(models_root):
+    _write_manifest_without_models_key(models_root)
+    manifest.add_model("org/model-a", {"backend": "mlx_vlm", "store_path": "store/mlx_vlm/a"})
+    assert "org/model-a" in manifest.list_models()
+
+
+def test_now_iso_matches_the_documented_utc_format():
+    import re
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", manifest.now_iso())
 
 
 def test_load_leaves_current_backend_names_untouched(models_root):

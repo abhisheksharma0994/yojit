@@ -23,6 +23,7 @@ dev = [
     "vulture>=2.11",
     "radon>=6.0",
     "xenon>=0.9",
+    "mutmut>=3.0",
 ]
 
 [project.scripts]
@@ -51,3 +52,6 @@ max-args = 6  # Backend.launch()'s signature is shared across 3 implementations
 [tool.vulture]
 paths = ["src/yojit"]
 min_confidence = 80
+
+[tool.mutmut]
+source_paths = ["src/yojit"]

@@ -9,6 +9,8 @@ dist/
 .mypy_cache/
 .coverage
 htmlcov/
+.mutmut-cache
+mutants/
 *.log
 
 # Downloaded model weights + manifest live here for dev checkouts (see

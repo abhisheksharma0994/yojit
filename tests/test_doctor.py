@@ -97,6 +97,21 @@ def test_run_warns_when_default_model_is_risky(mocker, models_root, opencode_con
                                     "tier": "high", "size_gb": 20.0})
     findings = doctor.run()
     assert any("WARNING" in f and "org/big" in f and "OOM crash risk" in f for f in findings)
+    assert any("uses 83% of RAM" in f for f in findings)  # 20.0 / 24.0, exact rounded percentage
+
+
+def test_run_treats_missing_size_gb_as_zero_not_a_crash(mocker, models_root, opencode_config):
+    _base_mocks(mocker)
+    manifest.add_model("org/no-size", {"backend": "mlx_vlm", "store_path": "store/mlx_vlm/no-size", "tier": "low"})
+    findings = doctor.run()
+    assert any("OK" in f and "org/no-size" in f and "fits comfortably" in f for f in findings)
+
+
+def test_run_shows_unknown_tier_when_entry_lacks_a_tier_field(mocker, models_root, opencode_config):
+    _base_mocks(mocker)
+    manifest.add_model("org/no-tier", {"backend": "mlx_vlm", "store_path": "store/mlx_vlm/no-tier", "size_gb": 1.0})
+    findings = doctor.run()
+    assert any("None tier" in f for f in findings)
 
 
 def test_run_warns_when_default_model_has_no_manifest_entry(mocker, models_root, opencode_config):

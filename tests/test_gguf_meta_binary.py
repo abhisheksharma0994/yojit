@@ -64,6 +64,16 @@ def test_read_metadata_parses_array_value(tmp_path):
     assert gguf_meta.read_metadata(path) == {"some.array": [1, 2, 3]}
 
 
+def test_read_metadata_replaces_invalid_utf8_bytes_instead_of_raising(tmp_path):
+    bad_bytes = b"\xff\xfe"  # not valid utf-8
+    data = _build_gguf([("bad.string", gguf_meta._TYPE_STRING,
+                          struct.pack("<Q", len(bad_bytes)) + bad_bytes)])
+    path = tmp_path / "model.gguf"
+    path.write_bytes(data)
+    meta = gguf_meta.read_metadata(path)
+    assert "�" in meta["bad.string"]  # decoded to the unicode replacement char, not a crash
+
+
 def test_read_metadata_returns_empty_dict_on_truncated_file(tmp_path):
     path = tmp_path / "truncated.gguf"
     path.write_bytes(b"GGUF" + struct.pack("<I", 3))  # cut off mid-header

@@ -34,15 +34,18 @@ def test_ensure_venv_skips_creation_if_already_present(mocker):
 
 
 def test_ensure_venv_creates_and_upgrades_pip_if_missing(mocker):
+    import sys
     mocker.patch.object(Path, "exists", return_value=False)
     mocker.patch.object(Path, "mkdir")
     mock_run = mocker.patch("yojit.mlx_env.subprocess.run")
     mlx_env.ensure_venv()
     assert mock_run.call_count == 2
-    venv_call = mock_run.call_args_list[0][0][0]
-    assert "venv" in venv_call
-    pip_upgrade_call = mock_run.call_args_list[1][0][0]
-    assert "pip" in pip_upgrade_call and "--upgrade" in pip_upgrade_call
+    venv_args, venv_kwargs = mock_run.call_args_list[0]
+    assert venv_args[0] == [sys.executable, "-m", "venv", str(mlx_env.VENV_DIR)]
+    assert venv_kwargs["check"] is True
+    pip_args, pip_kwargs = mock_run.call_args_list[1]
+    assert pip_args[0] == [str(mlx_env.venv_python()), "-m", "pip", "install", "--quiet", "--upgrade", "pip"]
+    assert pip_kwargs["check"] is True
 
 
 def test_is_installed_checks_inside_the_venv(mocker):
@@ -50,9 +53,9 @@ def test_is_installed_checks_inside_the_venv(mocker):
     mock_run = mocker.patch("yojit.mlx_env.subprocess.run")
     mock_run.return_value.returncode = 0
     assert mlx_env.is_installed("mlx_lm") is True
-    cmd = mock_run.call_args[0][0]
-    assert cmd[0] == str(mlx_env.venv_python())
-    assert "import mlx_lm" in cmd[2]
+    args, kwargs = mock_run.call_args
+    assert args[0] == [str(mlx_env.venv_python()), "-c", "import mlx_lm"]
+    assert kwargs["capture_output"] is True
 
 
 def test_is_installed_false_on_nonzero_exit(mocker):
@@ -66,11 +69,13 @@ def test_pip_install_targets_the_venv_pip_not_system(mocker):
     mocker.patch("yojit.mlx_env.ensure_venv")
     mock_run = mocker.patch("yojit.mlx_env.subprocess.run")
     mlx_env.pip_install("mlx-vlm")
-    cmd = mock_run.call_args[0][0]
+    args, kwargs = mock_run.call_args
+    cmd = args[0]
     assert cmd[0] == str(mlx_env.venv_python())
     assert cmd[1:4] == ["-m", "pip", "install"]
     assert "mlx-vlm" in cmd
     assert "--upgrade" not in cmd
+    assert kwargs["check"] is True
 
 
 def test_pip_install_upgrade_flag(mocker):
