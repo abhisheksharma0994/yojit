@@ -34,10 +34,7 @@ def test_install_mlx_writes_manifest_entry_and_syncs(models_root, opencode_confi
     assert entry["bits"] == 4  # parsed from the "-4bit" suffix
     assert entry["source_repo"] == "org/fake-model-4bit"
     assert entry["verified"] is False
-    # Regression: the manifest once said "mlx_vlm" while the real files
-    # still landed under store/mlx/ -- the physical directory name must
-    # match the backend name, not just the manifest field.
-    assert entry["store_path"].startswith("store/mlx_vlm/")
+    assert entry["store_path"].startswith("store/mlx_vlm/")  # real dir must match the backend name
 
     # discovery + opencode sync side effects must have run
     assert ((manifest.models_root() / "low" / "mlx_vlm").exists()

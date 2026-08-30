@@ -136,14 +136,17 @@ jobs:
       - name: Ask opencode to say hi and verify a real, non-empty reply
         run: |
           echo "=== Running opencode ==="
-          OUT=$(opencode run "Say hi in one word." -m "local/$MODEL_PATH" --format json)
+          set +e
+          OUT=$(opencode run "Say hi in one word." -m "local/$MODEL_PATH" --format json 2>&1)
+          OPENCODE_EXIT=$?
+          set -e
           echo "$OUT"
-          echo "=== opencode output above ==="
-          # --format json is JSONL (one event object per line), documented
-          # event types include "error" and "text" (with the reply text at
-          # .part.text). Fail the job (not just log) if we saw an explicit
-          # error event, or never saw a non-empty text event -- either means
-          # the request never produced a real completion through the server.
+          echo "=== opencode output above (exit code: $OPENCODE_EXIT) ==="
+          if [ "$OPENCODE_EXIT" -ne 0 ]; then
+            echo "opencode exited non-zero" >&2
+            exit 1
+          fi
+          # Fail if we saw an explicit error event, or never saw a non-empty text event.
           if echo "$OUT" | jq -es 'any(.[]; .type == "error")' > /dev/null; then
             echo "opencode reported an error event" >&2
             exit 1
