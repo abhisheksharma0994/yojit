@@ -1,11 +1,55 @@
-"""Regression fixtures from real OOM debugging tonight: Bonsai-27B (2-bit,
-hybrid mamba/linear-attention) and Qwen3.8-Uncensored (4-bit, dense-ish) on a
-24GB Mac. These exact numbers were verified against real mlx_lm.server
-crashes/successes -- if this test ever needs updating, re-verify against a
-real server run, don't just adjust the fixture to match new code."""
+"""Regression fixtures from two real model architectures (a hybrid
+mamba/linear-attention model and a dense-ish MoE model), numbers verified
+against real server behavior -- re-verify against a real run before adjusting."""
 from yojit import classify
 
 RAM_GB = 24.0
+
+
+def test_weight_size_gb_from_dir_sums_safetensors(tmp_path):
+    (tmp_path / "a.safetensors").write_bytes(b"0" * 1024)
+    (tmp_path / "b.safetensors").write_bytes(b"0" * 1024)
+    assert classify.weight_size_gb_from_dir(tmp_path) == 2048 / (1024 ** 3)
+
+
+def test_weight_size_gb_from_dir_falls_back_to_all_files_when_no_safetensors(tmp_path):
+    (tmp_path / "model.bin").write_bytes(b"0" * 1024)
+    assert classify.weight_size_gb_from_dir(tmp_path) == 1024 / (1024 ** 3)
+
+
+def test_weight_size_gb_from_dir_returns_zero_for_missing_dir(tmp_path):
+    assert classify.weight_size_gb_from_dir(tmp_path / "does-not-exist") == 0.0
+    assert classify.weight_size_gb_from_dir(None) == 0.0
+
+
+def test_weight_size_gb_from_file_returns_real_size(tmp_path):
+    f = tmp_path / "model.gguf"
+    f.write_bytes(b"0" * 2048)
+    assert classify.weight_size_gb_from_file(f) == 2048 / (1024 ** 3)
+
+
+def test_weight_size_gb_from_file_returns_zero_for_missing_file(tmp_path):
+    assert classify.weight_size_gb_from_file(tmp_path / "does-not-exist.gguf") == 0.0
+    assert classify.weight_size_gb_from_file(None) == 0.0
+
+
+def test_load_hf_config_returns_empty_dict_when_missing(tmp_path):
+    assert classify.load_hf_config(tmp_path) == {}
+
+
+def test_load_hf_config_returns_empty_dict_on_invalid_json(tmp_path):
+    (tmp_path / "config.json").write_text("{not valid json")
+    assert classify.load_hf_config(tmp_path) == {}
+
+
+def test_load_hf_config_parses_real_json(tmp_path):
+    (tmp_path / "config.json").write_text('{"num_hidden_layers": 32}')
+    assert classify.load_hf_config(tmp_path) == {"num_hidden_layers": 32}
+
+
+def test_resource_tier_treats_zero_or_negative_ram_as_high_risk():
+    assert classify.resource_tier(5.0, 0.0) == "high"
+    assert classify.resource_tier(5.0, -1.0) == "high"
 
 BONSAI_CONFIG = {
     "max_position_embeddings": 262144,
@@ -37,10 +81,7 @@ def test_qwen38_uncensored_4bit_context():
 
 
 def test_native_ctx_is_a_hard_ceiling_even_when_below_min_context():
-    """A small model's own native max must never be inflated past its real
-    architectural limit, even if that's below MIN_CONTEXT -- this was a real
-    bug found while testing GGUF models (TinyLlama's native 2048 was getting
-    bumped to 4096)."""
+    """A model's native max must never be inflated past its real limit, even below MIN_CONTEXT."""
     tiny_config = {
         "max_position_embeddings": 2048,
         "num_hidden_layers": 22,
@@ -53,21 +94,15 @@ def test_native_ctx_is_a_hard_ceiling_even_when_below_min_context():
 
 
 def test_resource_tier_boundaries():
-    # Boundaries are evidence-based, not theoretical: every model at/above
-    # 50% of RAM crashed with Metal OOM tonight regardless of context size
-    # (15GB/24GB=62.5% and 19GB/24GB=79% both crashed); Bonsai at 33% was
-    # rock-solid. See classify.py's MEDIUM_TIER_MAX_FRACTION comment.
+    # Boundaries are evidence-based: models at/above 50% of RAM risk OOM regardless of context size.
     assert classify.resource_tier(5.0, 24.0) == "low"        # 21%
     assert classify.resource_tier(10.0, 24.0) == "medium"     # 42%
-    assert classify.resource_tier(15.0, 24.0) == "high"       # 62.5% -- this exact case crashed tonight
-    assert classify.resource_tier(20.0, 24.0) == "high"       # 79% -- this exact case crashed tonight (harder/faster)
+    assert classify.resource_tier(15.0, 24.0) == "high"       # 62.5%
+    assert classify.resource_tier(20.0, 24.0) == "high"       # 79%
 
 
 def test_compute_launch_tuning_scales_prefill_step_size_with_headroom():
-    """More headroom -> bigger prefill chunks -> faster prefill, per real
-    benchmarking (mlx-lm/lmstudio-js discussions): ~8192 is the sweet spot
-    with headroom to spare, not higher (16384 regresses due to allocation
-    overhead), and tight headroom keeps the original conservative 512."""
+    """More headroom -> bigger prefill chunks -> faster prefill."""
     tight = classify.compute_launch_tuning(weight_gb=15.0, ram_gb=24.0, cpu_cores=8)  # ~1GB headroom
     generous = classify.compute_launch_tuning(weight_gb=4.0, ram_gb=64.0, cpu_cores=8)  # ~52GB headroom
     assert tight["prefill_step_size"] == 512
@@ -75,19 +110,14 @@ def test_compute_launch_tuning_scales_prefill_step_size_with_headroom():
 
 
 def test_compute_launch_tuning_pins_concurrency_to_one_regardless_of_headroom():
-    """No concurrency knob is scaled up even with abundant headroom -- until
-    concurrent-request memory accounting is modeled explicitly, single-
-    request is the only verified-safe configuration for both backends."""
+    """No concurrency knob scales up, even with abundant headroom."""
     tuning = classify.compute_launch_tuning(weight_gb=4.0, ram_gb=128.0, cpu_cores=16)
     assert tuning["decode_concurrency"] == 1
     assert tuning["prompt_concurrency"] == 1
 
 
 def test_compute_launch_tuning_prompt_cache_bytes_scales_with_headroom_not_fixed():
-    """Regression: the old flat 5GB constant wasn't actually protective on a
-    tight machine (could exceed the entire headroom) and under-used
-    available memory on a generous one. Must scale with real headroom,
-    within sane min/max bounds."""
+    """Must scale with real headroom, within sane min/max bounds, not a fixed constant."""
     tight = classify.compute_launch_tuning(weight_gb=15.0, ram_gb=24.0, cpu_cores=8)
     generous = classify.compute_launch_tuning(weight_gb=4.0, ram_gb=64.0, cpu_cores=8)
     assert tight["prompt_cache_bytes"] < generous["prompt_cache_bytes"]
@@ -124,15 +154,49 @@ def test_fits_at_all():
 
 
 def test_maple_preview_moe_2bit_produces_garbage_is_not_this_modules_job():
-    """Documents a real finding: connorbillen's community 2-bit re-quant of
-    Qwen3.6-35B-A3B (10.1GB, 42% -- passes every check in this module) still
-    produced completely broken/repetitive output in live testing. classify.py
-    can only ever guarantee a model *fits in memory* -- it has no way to
-    predict quantization-induced output quality. This test exists so nobody
-    "fixes" classify.py to try to catch that class of failure; it can't."""
+    """A model can pass every fit check here and still produce broken output --
+    classify.py can only guarantee memory fit, not quantization quality."""
     community_2bit_weight_gb = 10.1
     assert classify.resource_tier(community_2bit_weight_gb, 24.0) == "medium"
     assert classify.fits_at_all(community_2bit_weight_gb, 24.0) is True
-    # ^ both checks pass; the model was still unusable. Quality verification
-    # requires an actual generation test (see backends warm_up / doctor
-    # "verified" flag), not a memory-fit calculation.
+
+
+# --- default_kv_cache_overrides: hand-derived expected values, not copied from a prior run ---
+# 32 layers, 8 KV heads, head_dim 128 -> bytes_per_token_fp16 = 2*32*8*128*2 = 131072.
+_KV_TEST_CFG = {"num_hidden_layers": 32, "num_key_value_heads": 8, "head_dim": 128}
+_KV_TEST_BYTES_PER_TOKEN_FP16 = 2 * 32 * 8 * 128 * 2
+
+
+def test_default_kv_cache_overrides_empty_for_an_unsupported_backend_name():
+    assert classify.default_kv_cache_overrides(_KV_TEST_CFG, "mlx", weight_gb=20.0, ram_gb=24.0, context=16384) == {}
+
+
+def test_default_kv_cache_overrides_empty_when_unquantized_already_fits():
+    result = classify.default_kv_cache_overrides(_KV_TEST_CFG, "mlx_vlm", weight_gb=5.0, ram_gb=24.0, context=16384)
+    assert result == {}
+
+
+def test_default_kv_cache_overrides_picks_8bit_when_that_fits_but_not_fp16(mocker):
+    """Must pick the highest-precision bit-width that actually fits, not jump straight to the most aggressive."""
+    result = classify.default_kv_cache_overrides(_KV_TEST_CFG, "mlx_vlm", weight_gb=10.0, ram_gb=24.0, context=16384)
+    assert result["kv_cache_quant"] == "8"
+    headroom_bytes = max(24.0 - 10.0 - classify.RESERVED_OS_GB, 0.1) * (1024 ** 3) * classify.SAFETY_FACTOR
+    assert result["quantized_kv_start"] == int(headroom_bytes / _KV_TEST_BYTES_PER_TOKEN_FP16)
+
+
+def test_default_kv_cache_overrides_falls_back_to_4bit_when_even_8bit_does_not_fit():
+    result = classify.default_kv_cache_overrides(_KV_TEST_CFG, "mlx_vlm", weight_gb=15.0, ram_gb=24.0, context=16384)
+    assert result["kv_cache_quant"] == "4"
+    assert 0 <= result["quantized_kv_start"] <= 16384
+
+
+def test_default_kv_cache_overrides_uses_llamacpp_cache_type_names():
+    result = classify.default_kv_cache_overrides(_KV_TEST_CFG, "llamacpp", weight_gb=10.0, ram_gb=24.0, context=16384)
+    assert result == {"kv_cache_quant": "q8_0"}
+
+
+def test_default_kv_cache_overrides_scales_with_more_ram_not_a_fixed_tier():
+    tight = classify.default_kv_cache_overrides(_KV_TEST_CFG, "mlx_vlm", weight_gb=15.0, ram_gb=24.0, context=16384)
+    roomy = classify.default_kv_cache_overrides(_KV_TEST_CFG, "mlx_vlm", weight_gb=15.0, ram_gb=128.0, context=16384)
+    assert tight != {}
+    assert roomy == {}

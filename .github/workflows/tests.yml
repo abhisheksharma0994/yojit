@@ -12,6 +12,36 @@ on:
   workflow_dispatch: {}
 
 jobs:
+  lint:
+    # Static checks: every push and PR. ruff covers style/lint/import-sort
+    # (superset of flake8) plus complexity (mccabe) and pylint-refactor
+    # rules; vulture catches dead code ruff doesn't (whole unused functions).
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install package with dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: ruff (lint, imports, complexity)
+        run: ruff check src/ tests/
+
+      - name: vulture (dead code)
+        run: vulture src/yojit tests --min-confidence 80
+
+      - name: xenon (cyclomatic complexity hard gate, McCabe <=10 per function)
+        run: xenon --max-absolute B --max-modules A --max-average A src/yojit
+
+      - name: radon (maintainability index report)
+        # Informational only -- no standard pass/fail gate exists for MI;
+        # xenon above is the hard gate for complexity.
+        run: radon mi src/yojit -s
+
   test:
     # Fast unit tests: every push and PR, not on the daily schedule (that's
     # what the e2e job below is for).
@@ -36,12 +66,12 @@ jobs:
       - name: Install package with dev dependencies
         run: pip install -e ".[dev]"
 
-      - name: Run unit tests
-        run: pytest -v
+      - name: Run unit tests with coverage (95% minimum)
+        run: pytest -v --cov=src/yojit --cov-report=term-missing --cov-fail-under=95
 
   e2e:
     # Real end-to-end smoke test: downloads an actual (tiny) model, starts a
-    # real mlx_lm.server, and verifies opencode gets a real, non-empty reply
+    # real mlx_vlm.server, and verifies opencode gets a real, non-empty reply
     # through it -- via opencode's non-interactive `run` mode, which is
     # scriptable (unlike its default full-screen TUI). This is deliberately
     # NOT part of the fast unit-test job: it needs real network + real Metal
@@ -60,10 +90,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install yojit and mlx-lm
-        run: |
-          pip install -e .
-          pip install mlx-lm
+      - name: Install yojit
+        # mlx-vlm is installed automatically by yojit itself, into its own
+        # isolated venv (~/.yojit/venv), the first time a model is served --
+        # no separate pip install needed here.
+        run: pip install -e .
 
       - name: Install opencode
         run: brew install anomalyco/tap/opencode
@@ -81,14 +112,14 @@ jobs:
       - name: Install a tiny real model (~0.6GB, kept small for CI speed)
         run: |
           yojit install "$TEST_MODEL"
-          ls -la "$YOJIT_HOME/store/mlx/"
-          ls -la "$YOJIT_HOME/store/mlx/${TEST_MODEL//\//__}" 2>/dev/null || echo "Model not in expected location"
+          ls -la "$YOJIT_HOME/store/mlx_vlm/"
+          ls -la "$YOJIT_HOME/store/mlx_vlm/${TEST_MODEL//\//__}" 2>/dev/null || echo "Model not in expected location"
 
       - name: Verify model is accessible
         run: |
           echo "Testing if model files exist..."
-          ls -la "$YOJIT_HOME/store/mlx/"
-          ls -la "$YOJIT_HOME/store/mlx/${TEST_MODEL//\//__}"/*.safetensors 2>/dev/null || echo "No safetensors found"
+          ls -la "$YOJIT_HOME/store/mlx_vlm/"
+          ls -la "$YOJIT_HOME/store/mlx_vlm/${TEST_MODEL//\//__}"/*.safetensors 2>/dev/null || echo "No safetensors found"
 
       - name: Serve it (real launch + real warm-up verification)
         run: yojit serve --no-open

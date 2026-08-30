@@ -1,10 +1,4 @@
-"""cmd_init's dynamic model-suggestion + implicit install+serve flow.
-
-The suggestion pipeline is the same generic search/rank/fit logic `explore`
-uses (hf_explore + classify) -- no hardcoded model list, so it generalizes
-to any machine's RAM and stays current as new models are released. These
-tests mock the HF-facing calls, never hitting the real network.
-"""
+"""cmd_init's dynamic model-suggestion + implicit install+serve flow. All HF calls are mocked."""
 import argparse
 
 from yojit import cli, manifest
@@ -12,7 +6,7 @@ from yojit.specs import Specs
 
 
 def _fake_specs(ram_gb=24.0):
-    return Specs(platform="darwin", is_apple_silicon=True, chip="Apple M5 Pro",
+    return Specs(platform="darwin", is_apple_silicon=True, chip="Apple Silicon",
                  total_ram_gb=ram_gb, free_disk_gb=500.0, cpu_cores=12)
 
 
@@ -71,12 +65,46 @@ def test_suggest_model_skips_non_mlx_repos(mocker):
     assert repo == "org/mlx-repo"
 
 
+def test_suggest_model_skips_a_candidate_whose_files_call_fails(mocker):
+    mocker.patch.object(cli.hf_explore, "search", return_value=[
+        {"id": "org/broken", "downloads": 9999, "pipeline_tag": "text-generation", "tags": []},
+        {"id": "org/fine", "downloads": 100, "pipeline_tag": "text-generation", "tags": []},
+    ])
+
+    def fake_repo_files(repo_id):
+        if repo_id == "org/broken":
+            raise RuntimeError("404")
+        return [{"path": "config.json"}, {"path": "model.safetensors", "size": 5 * 1024**3}]
+
+    mocker.patch.object(cli.hf_explore, "repo_files", side_effect=fake_repo_files)
+
+    repo, reason = cli._suggest_model_for_ram(24.0)
+
+    assert repo == "org/fine"
+
+
+def test_suggest_model_skips_a_candidate_with_no_real_weight_size(mocker):
+    mocker.patch.object(cli.hf_explore, "search", return_value=[
+        {"id": "org/sizeless", "downloads": 9999, "pipeline_tag": "text-generation", "tags": []},
+        {"id": "org/fine", "downloads": 100, "pipeline_tag": "text-generation", "tags": []},
+    ])
+    mocker.patch.object(cli.hf_explore, "repo_files", side_effect=lambda repo_id: {
+        "org/sizeless": [{"path": "config.json"}, {"path": "model.safetensors"}],  # no "size" key
+        "org/fine": [{"path": "config.json"}, {"path": "model.safetensors", "size": 5 * 1024**3}],
+    }[repo_id])
+
+    repo, reason = cli._suggest_model_for_ram(24.0)
+
+    assert repo == "org/fine"
+
+
 # --- cmd_init integration: mocked suggestion + install + serve ------------
 
 def test_init_skips_suggestion_flow_when_models_already_installed(models_root, opencode_config, mocker):
     manifest.add_model("org/existing", {"backend": "mlx", "store_path": "store/mlx/existing"})
     mocker.patch.object(cli.specs, "detect", return_value=_fake_specs())
     mocker.patch("shutil.which", return_value="/usr/bin/fake")
+    mocker.patch.object(cli.mlx_env, "is_installed", return_value=True)
     mock_suggest = mocker.patch.object(cli, "_suggest_model_for_ram")
     mock_resolve = mocker.patch.object(cli, "_resolve_install")
     mock_serve = mocker.patch.object(cli.server, "serve")
@@ -88,10 +116,14 @@ def test_init_skips_suggestion_flow_when_models_already_installed(models_root, o
     mock_serve.assert_not_called()
 
 
-def test_init_installs_and_serves_the_dynamic_suggestion_on_blank_or_y(models_root, opencode_config, monkeypatch, mocker):
+def test_init_installs_and_serves_the_dynamic_suggestion_on_blank_or_y(
+    models_root, opencode_config, monkeypatch, mocker
+):
     mocker.patch.object(cli.specs, "detect", return_value=_fake_specs())
     mocker.patch("shutil.which", return_value="/usr/bin/fake")
-    mocker.patch.object(cli, "_suggest_model_for_ram", return_value=("org/dynamic-pick", "5.0GB, low tier, 100 downloads"))
+    mocker.patch.object(cli.mlx_env, "is_installed", return_value=True)
+    mocker.patch.object(cli, "_suggest_model_for_ram",
+                         return_value=("org/dynamic-pick", "5.0GB, low tier, 100 downloads"))
     monkeypatch.setattr("builtins.input", lambda _: "")
     mock_resolve = mocker.patch.object(cli, "_resolve_install")
     mock_serve = mocker.patch.object(cli.server, "serve")
@@ -106,6 +138,7 @@ def test_init_installs_and_serves_the_dynamic_suggestion_on_blank_or_y(models_ro
 def test_init_installs_a_custom_repo_id_overriding_the_suggestion(models_root, opencode_config, monkeypatch, mocker):
     mocker.patch.object(cli.specs, "detect", return_value=_fake_specs())
     mocker.patch("shutil.which", return_value="/usr/bin/fake")
+    mocker.patch.object(cli.mlx_env, "is_installed", return_value=True)
     mocker.patch.object(cli, "_suggest_model_for_ram", return_value=("org/dynamic-pick", "reason"))
     monkeypatch.setattr("builtins.input", lambda _: "org/my-custom-model")
     mock_resolve = mocker.patch.object(cli, "_resolve_install")
@@ -119,6 +152,7 @@ def test_init_installs_a_custom_repo_id_overriding_the_suggestion(models_root, o
 def test_init_skips_entirely_on_n(models_root, opencode_config, monkeypatch, mocker):
     mocker.patch.object(cli.specs, "detect", return_value=_fake_specs())
     mocker.patch("shutil.which", return_value="/usr/bin/fake")
+    mocker.patch.object(cli.mlx_env, "is_installed", return_value=True)
     mocker.patch.object(cli, "_suggest_model_for_ram", return_value=("org/dynamic-pick", "reason"))
     monkeypatch.setattr("builtins.input", lambda _: "n")
     mock_resolve = mocker.patch.object(cli, "_resolve_install")
@@ -130,12 +164,15 @@ def test_init_skips_entirely_on_n(models_root, opencode_config, monkeypatch, moc
     mock_serve.assert_not_called()
 
 
-def test_init_with_no_suggestion_found_prompts_for_a_repo_id_and_blank_skips(models_root, opencode_config, monkeypatch, mocker):
+def test_init_with_no_suggestion_found_prompts_for_a_repo_id_and_blank_skips(
+    models_root, opencode_config, monkeypatch, mocker
+):
     """When nothing could be auto-suggested (offline, nothing fits), blank
     input must mean 'skip', not accidentally install something -- there's no
     suggestion to fall back to."""
     mocker.patch.object(cli.specs, "detect", return_value=_fake_specs())
     mocker.patch("shutil.which", return_value="/usr/bin/fake")
+    mocker.patch.object(cli.mlx_env, "is_installed", return_value=True)
     mocker.patch.object(cli, "_suggest_model_for_ram", return_value=(None, None))
     monkeypatch.setattr("builtins.input", lambda _: "")
     mock_resolve = mocker.patch.object(cli, "_resolve_install")
@@ -147,9 +184,12 @@ def test_init_with_no_suggestion_found_prompts_for_a_repo_id_and_blank_skips(mod
     mock_serve.assert_not_called()
 
 
-def test_init_with_no_suggestion_found_still_accepts_a_pasted_repo_id(models_root, opencode_config, monkeypatch, mocker):
+def test_init_with_no_suggestion_found_still_accepts_a_pasted_repo_id(
+    models_root, opencode_config, monkeypatch, mocker
+):
     mocker.patch.object(cli.specs, "detect", return_value=_fake_specs())
     mocker.patch("shutil.which", return_value="/usr/bin/fake")
+    mocker.patch.object(cli.mlx_env, "is_installed", return_value=True)
     mocker.patch.object(cli, "_suggest_model_for_ram", return_value=(None, None))
     monkeypatch.setattr("builtins.input", lambda _: "org/my-own-pick")
     mock_resolve = mocker.patch.object(cli, "_resolve_install")

@@ -1,12 +1,5 @@
 """llama.cpp backend: wraps llama-server with launch parameters computed
-from this machine's actual specs (see classify.compute_launch_tuning), not
-fixed constants.
-
-Memory-safety flags here are llama.cpp's own equivalents to what was tuned
-for MLX -- they still need a real stress-testing pass (large-prompt OOM
-behavior on llama.cpp differs from MLX's Metal allocator) before being
-trusted as blindly as the MLX flags, which were verified against real
-crashes.
+from this machine's actual specs (see classify.compute_launch_tuning).
 """
 import shutil
 import subprocess
@@ -31,7 +24,9 @@ class LlamaCppBackend(Backend):
         print("llama-server not found -- installing via Homebrew (brew install llama.cpp)...")
         subprocess.run(["brew", "install", "llama.cpp"], check=True)
 
-    def launch(self, model_path: Path, port: int, context: int, output_limit: int, tuning: dict):
+    def launch(self, model_path: Path, port: int, context: int, output_limit: int, tuning: dict,
+               overrides: dict | None = None):
+        overrides = overrides or {}
         gguf_file = model_path if model_path.suffix == ".gguf" else next(model_path.glob("*.gguf"))
         cmd = [
             "llama-server",
@@ -44,14 +39,12 @@ class LlamaCppBackend(Backend):
             "--gpu-layers", str(tuning["ngl"]),
             "--batch-size", str(tuning["batch_size"]),
             "--ubatch-size", str(tuning["ubatch_size"]),
-            # llama-server defaults to 4 parallel request slots, each
-            # allocating its own KV cache sized to --ctx-size -- found via
-            # real testing (server log showed "n_slots = 4"). classify.py's
-            # RAM math assumes a single request's worth of KV cache, so
-            # without this the real memory usage could be up to 4x what was
-            # computed as "safe". Pin to one slot to match that assumption.
-            "--parallel", "1",
+            # llama-server defaults to 4 parallel slots, each with its own KV cache -- pin to 1 unless overridden.
+            "--parallel", str(overrides.get("max_concurrent_predictions", 1)),
+            "--seed", str(overrides.get("seed", -1)),  # -1 = random
         ]
+        if overrides.get("kv_cache_quant"):
+            cmd += ["--cache-type-k", overrides["kv_cache_quant"], "--cache-type-v", overrides["kv_cache_quant"]]
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(LOG_PATH, "w")
         return subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)

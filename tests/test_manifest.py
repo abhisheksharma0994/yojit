@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from yojit import manifest
@@ -91,3 +93,61 @@ def test_manifest_survives_corrupt_json_by_returning_empty_shape(models_root):
     manifest.manifest_path().write_text("{not valid json")
     data = manifest.load()
     assert data == {"schema_version": 1, "default_model": None, "models": {}}
+
+
+def test_update_overrides_rejects_uninstalled_model(models_root):
+    try:
+        manifest.update_overrides("org/not-installed", seed=42)
+        assert False, "expected KeyError"
+    except KeyError:
+        pass
+
+
+def test_update_overrides_writes_only_given_fields(models_root):
+    manifest.add_model("org/model-a", {"backend": "mlx_vlm", "store_path": "store/mlx_vlm/a"})
+    result = manifest.update_overrides("org/model-a", seed=42, kv_cache_quant=None)
+    assert result == {"seed": 42}
+    assert manifest.get_model("org/model-a")["overrides"] == {"seed": 42}
+
+
+def test_update_overrides_merges_without_clobbering_prior_fields(models_root):
+    manifest.add_model("org/model-a", {"backend": "mlx_vlm", "store_path": "store/mlx_vlm/a"})
+    manifest.update_overrides("org/model-a", seed=42)
+    result = manifest.update_overrides("org/model-a", kv_cache_quant=8)
+    assert result == {"seed": 42, "kv_cache_quant": 8}
+
+
+def test_update_overrides_can_replace_a_previously_set_field(models_root):
+    manifest.add_model("org/model-a", {"backend": "mlx_vlm", "store_path": "store/mlx_vlm/a"})
+    manifest.update_overrides("org/model-a", seed=42)
+    result = manifest.update_overrides("org/model-a", seed=7)
+    assert result == {"seed": 7}
+
+
+# --- Retired-backend migration ---------------------------------------------
+# The plain mlx-lm-only backend ("mlx") was removed once mlx_vlm.server was
+# verified to serve text-only models correctly too. Any manifest already on
+# disk with the old name must keep working transparently -- never a
+# KeyError from backends.get_backend("mlx"), which no longer exists.
+
+def test_load_migrates_a_retired_backend_name_transparently(models_root):
+    manifest.models_root().mkdir(parents=True, exist_ok=True)
+    manifest.manifest_path().write_text(json.dumps({
+        "schema_version": 1,
+        "default_model": "org/old-model",
+        "models": {"org/old-model": {"backend": "mlx", "store_path": "store/mlx/old-model"}},
+    }))
+
+    data = manifest.load()
+
+    assert data["models"]["org/old-model"]["backend"] == "mlx_vlm"
+
+
+def test_load_leaves_current_backend_names_untouched(models_root):
+    manifest.add_model("org/model-a", {"backend": "mlx_vlm", "store_path": "store/mlx_vlm/a"})
+    manifest.add_model("org/model-b", {"backend": "llamacpp", "store_path": "store/llamacpp/b.gguf"})
+
+    data = manifest.load()
+
+    assert data["models"]["org/model-a"]["backend"] == "mlx_vlm"
+    assert data["models"]["org/model-b"]["backend"] == "llamacpp"

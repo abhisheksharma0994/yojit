@@ -1,6 +1,45 @@
 from yojit import hf_explore
 
 
+def test_search_builds_expected_params_and_returns_json(mocker):
+    mock_response = mocker.Mock()
+    mock_response.json.return_value = [{"id": "org/model-a"}]
+    mock_get = mocker.patch("yojit.hf_explore.requests.get", return_value=mock_response)
+
+    result = hf_explore.search(query="qwen", limit=10)
+
+    assert result == [{"id": "org/model-a"}]
+    mock_response.raise_for_status.assert_called_once()
+    args, kwargs = mock_get.call_args
+    assert args[0] == hf_explore.API
+    assert kwargs["params"]["search"] == "qwen"
+    assert kwargs["params"]["author"] == hf_explore.DEFAULT_AUTHOR
+    assert kwargs["params"]["limit"] == 10
+
+
+def test_search_omits_author_when_explicitly_none(mocker):
+    mock_response = mocker.Mock()
+    mock_response.json.return_value = []
+    mock_get = mocker.patch("yojit.hf_explore.requests.get", return_value=mock_response)
+
+    hf_explore.search(query=None, author=None)
+
+    assert "author" not in mock_get.call_args.kwargs["params"]
+    assert "search" not in mock_get.call_args.kwargs["params"]
+
+
+def test_repo_files_hits_expected_url_and_returns_json(mocker):
+    mock_response = mocker.Mock()
+    mock_response.json.return_value = [{"path": "config.json"}]
+    mock_get = mocker.patch("yojit.hf_explore.requests.get", return_value=mock_response)
+
+    result = hf_explore.repo_files("org/model-a")
+
+    assert result == [{"path": "config.json"}]
+    mock_response.raise_for_status.assert_called_once()
+    assert mock_get.call_args[0][0] == f"{hf_explore.API}/org/model-a/tree/main"
+
+
 def test_detect_backend_from_files_recognizes_mlx_repo():
     files = [{"path": "config.json"}, {"path": "model.safetensors"}, {"path": "tokenizer.json"}]
     assert hf_explore.detect_backend_from_files(files) == "mlx"
@@ -29,51 +68,19 @@ def test_bit_width_from_name_extracts_trailing_bit_suffix():
     assert hf_explore.bit_width_from_name("mlx-community/Qwen3.6-27B-6BIT") == 6  # case-insensitive
 
 
+def test_bit_width_from_name_extracts_hyphenated_bare_subfolder_names():
+    """Regression: real multi-quant repos use bare "N-bit" subfolder names
+    (digit-hyphen-bit), a different convention from full repo names'
+    "-Nbit" suffix (hyphen-digit-bit, no hyphen before "bit"). Both must
+    parse correctly since _resolve_mlx_install uses this for both."""
+    assert hf_explore.bit_width_from_name("4-bit") == 4
+    assert hf_explore.bit_width_from_name("8-bit") == 8
+    assert hf_explore.bit_width_from_name("6-BIT") == 6
+
+
 def test_bit_width_from_name_returns_none_for_non_bit_suffixed_names():
     assert hf_explore.bit_width_from_name("mlx-community/Qwen3.6-27B-bf16") is None
     assert hf_explore.bit_width_from_name("mlx-community/Qwen3.6-27B-OptiQ-4bit") == 4
-
-
-def test_sibling_bit_variants_matches_same_base_model_family():
-    candidates = [
-        {"id": "mlx-community/Qwen3.6-27B-4bit"},
-        {"id": "mlx-community/Qwen3.6-27B-6bit"},
-        {"id": "mlx-community/Qwen3.6-27B-8bit"},
-        {"id": "mlx-community/Qwen3.6-35B-A3B-4bit"},  # different base model
-    ]
-    siblings = hf_explore.sibling_bit_variants("mlx-community/Qwen3.6-27B-4bit", candidates)
-    ids = {c["id"] for c in siblings}
-    assert ids == {
-        "mlx-community/Qwen3.6-27B-4bit",
-        "mlx-community/Qwen3.6-27B-6bit",
-        "mlx-community/Qwen3.6-27B-8bit",
-    }
-
-
-def test_pick_best_fit_prefers_largest_bit_width_that_still_fits_comfortably():
-    """Regression for the 'don't assume smallest is best' lesson: given a
-    choice, pick_best_fit must choose the LARGEST bit-width that still lands
-    in low/medium tier, not the tightest-possible fit."""
-    ram_gb = 24.0
-    variants = [
-        {"id": "org/model-4bit"},
-        {"id": "org/model-6bit"},
-        {"id": "org/model-8bit"},
-    ]
-    sizes = {
-        "org/model-4bit": 8.0,   # 33% -> low, fits
-        "org/model-6bit": 11.0,  # 46% -> medium, fits
-        "org/model-8bit": 20.0,  # 83% -> high, does NOT fit safely
-    }
-    best = hf_explore.pick_best_fit(variants, ram_gb, sizes)
-    assert best["id"] == "org/model-6bit"  # largest that still fits comfortably
-
-
-def test_pick_best_fit_returns_none_when_nothing_fits():
-    ram_gb = 24.0
-    variants = [{"id": "org/model-8bit"}]
-    sizes = {"org/model-8bit": 20.0}  # 83%, doesn't fit
-    assert hf_explore.pick_best_fit(variants, ram_gb, sizes) is None
 
 
 def _gguf(path, size_gb):

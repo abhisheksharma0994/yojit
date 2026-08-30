@@ -1,9 +1,4 @@
-"""Minimal GGUF header metadata reader -- just enough to get real
-architecture numbers (context length, layers, heads) for classify.py's
-KV-cache math, instead of guessing. No external dependency: GGUF's metadata
-section is a simple documented binary format, and we only need to read the
-header (a few KB), never the tensor data that makes up the rest of the file.
-
+"""Minimal GGUF header metadata reader for classify.py's KV-cache math.
 Spec: https://github.com/ggml-org/ggml/blob/master/docs/gguf.md
 """
 import struct
@@ -39,9 +34,7 @@ def _read_value(f, value_type: int):
 
 
 def read_metadata(path) -> dict:
-    """Returns the raw GGUF metadata dict (dotted keys -> values), or {} on
-    any parse failure -- callers should treat a missing key as unknown and
-    fall back to safe defaults, never crash on a malformed/unusual file."""
+    """Returns the raw GGUF metadata dict (dotted keys -> values), or {} on any parse failure."""
     try:
         with open(path, "rb") as f:
             magic = f.read(4)
@@ -61,18 +54,8 @@ def read_metadata(path) -> dict:
 
 
 def to_hf_style_config(meta: dict) -> dict:
-    """Translates GGUF's `{arch}.*` keys into the HF config.json field names
-    classify.py's estimate_limits_from_config() already knows how to read.
-
-    Hybrid architectures (mamba/linear-attention mixes, e.g. Qwen3.5/3.8's
-    "qwen35") don't store a per-layer layer_types list the way HF's
-    config.json does -- they store a single `{arch}.full_attention_interval`
-    integer instead (confirmed via a real GGUF file: interval=4 alongside
-    `{arch}.ssm.*` keys proving the non-full-attention layers are SSM-based).
-    Missing this made classify.py treat every layer as full-attention,
-    overestimating KV-cache cost ~4x and producing a far-too-small computed
-    context (a real bug found via a live opencode compaction-loop report).
-    """
+    """Translates GGUF's `{arch}.*` keys into the HF config.json field names classify.py expects.
+    Hybrid architectures store `{arch}.full_attention_interval` instead of a per-layer layer_types list."""
     arch = meta.get("general.architecture")
     if not arch:
         return {}
@@ -93,10 +76,5 @@ def to_hf_style_config(meta: dict) -> dict:
         "hidden_size": meta.get(f"{arch}.embedding_length"),
         "num_attention_heads": meta.get(f"{arch}.attention.head_count"),
         "num_key_value_heads": meta.get(f"{arch}.attention.head_count_kv"),
-        # key_length is the real per-head dimension when GGUF declares it
-        # directly -- more accurate than deriving it from hidden_size /
-        # num_attention_heads, which is wrong for architectures where those
-        # don't divide evenly into the true head_dim (this one included:
-        # 5120/24 != 256, the model's actual declared key_length).
-        "head_dim": meta.get(f"{arch}.attention.key_length"),
+        "head_dim": meta.get(f"{arch}.attention.key_length"),  # more accurate than hidden_size / heads
     }

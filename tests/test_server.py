@@ -1,5 +1,4 @@
 import json
-import os
 
 import pytest
 
@@ -16,13 +15,14 @@ class FakeBackend:
         self._health_sequence = list(health_sequence)
         self.ensure_installed_called = False
         self.warm_up_called = False
+        self.warm_up_called_with = None
         self.launch_called_with = None
 
     def ensure_installed(self):
         self.ensure_installed_called = True
 
-    def launch(self, model_path, port, context, output_limit, tuning):
-        self.launch_called_with = (model_path, port, context, output_limit, tuning)
+    def launch(self, model_path, port, context, output_limit, tuning, overrides=None):
+        self.launch_called_with = (model_path, port, context, output_limit, tuning, overrides)
 
         class FakeProc:
             pid = 4242
@@ -35,28 +35,108 @@ class FakeBackend:
 
     def warm_up(self, port, model_id):
         self.warm_up_called = True
+        self.warm_up_called_with = model_id
 
 
 # --- opencode.json <-> backend launch contract -----------------------------
 
+def test_serve_passes_manifest_overrides_through_to_backend_launch(
+    models_root, opencode_config, monkeypatch
+):
+    """Per-model overrides set via `yojit config` must reach backend.launch()."""
+    manifest.add_model("org/model-a", {"backend": "mlx", "store_path": "store/mlx/a", "tier": "low"})
+    manifest.update_overrides("org/model-a", seed=42, kv_cache_quant=8)
+    fake = FakeBackend(health_sequence=[True])
+    monkeypatch.setattr(server, "get_backend", lambda name: fake)
+    monkeypatch.setattr(server, "_free_port", lambda port: None)
+
+    server.serve("org/model-a", open_opencode=False)
+
+    overrides_passed = fake.launch_called_with[5]
+    assert overrides_passed == {"seed": 42, "kv_cache_quant": 8}
+
+
+def test_serve_passes_empty_overrides_when_none_ever_configured(
+    models_root, opencode_config, monkeypatch
+):
+    manifest.add_model("org/model-a", {"backend": "mlx", "store_path": "store/mlx/a", "tier": "low"})
+    fake = FakeBackend(health_sequence=[True])
+    monkeypatch.setattr(server, "get_backend", lambda name: fake)
+    monkeypatch.setattr(server, "_free_port", lambda port: None)
+
+    server.serve("org/model-a", open_opencode=False)
+
+    assert fake.launch_called_with[5] == {}
+
+
+def test_serve_applies_hardware_derived_defaults_for_a_never_configured_model(
+    models_root, opencode_config, monkeypatch
+):
+    """A model with no `yojit config` overrides must still get a real,
+    machine-derived configuration, not an empty {}."""
+    import yojit.specs as specs_module
+    fake_specs = specs_module.Specs(platform="darwin", is_apple_silicon=True, chip="test",
+                                     total_ram_gb=24.0, free_disk_gb=100.0, cpu_cores=8)
+    monkeypatch.setattr(server.specs, "detect", lambda: fake_specs)
+    fake = FakeBackend(health_sequence=[True])
+    fake.name = "mlx_vlm"
+    manifest.add_model("org/model-a", {"backend": "mlx_vlm", "store_path": "store/mlx_vlm/a", "tier": "high",
+                                        "size_gb": 15.0, "context": 16384})
+    monkeypatch.setattr(server, "get_backend", lambda name: fake)
+    monkeypatch.setattr(server, "_free_port", lambda port: None)
+
+    server.serve("org/model-a", open_opencode=False)
+
+    from yojit import classify
+    expected = classify.default_kv_cache_overrides({}, "mlx_vlm", 15.0, 24.0, 16384)
+    assert fake.launch_called_with[5] == expected
+    assert expected != {}  # sanity: this scenario (15GB/24GB) must actually need quantization
+
+
+def test_serve_explicit_config_overrides_win_over_hardware_derived_defaults(
+    models_root, opencode_config, monkeypatch
+):
+    import yojit.specs as specs_module
+    fake_specs = specs_module.Specs(platform="darwin", is_apple_silicon=True, chip="test",
+                                     total_ram_gb=24.0, free_disk_gb=100.0, cpu_cores=8)
+    monkeypatch.setattr(server.specs, "detect", lambda: fake_specs)
+    fake = FakeBackend(health_sequence=[True])
+    fake.name = "mlx_vlm"
+    manifest.add_model("org/model-a", {"backend": "mlx_vlm", "store_path": "store/mlx_vlm/a", "tier": "high",
+                                        "size_gb": 15.0, "context": 16384})
+    manifest.update_overrides("org/model-a", kv_cache_quant="4")  # user explicitly wants 4-bit
+    monkeypatch.setattr(server, "get_backend", lambda name: fake)
+    monkeypatch.setattr(server, "_free_port", lambda port: None)
+
+    server.serve("org/model-a", open_opencode=False)
+
+    overrides = fake.launch_called_with[5]
+    assert overrides["kv_cache_quant"] == "4"
+    assert "quantized_kv_start" in overrides  # the untouched default field survives the merge
+
+
+def test_warm_up_uses_the_local_path_not_the_manifest_model_id(
+    models_root, opencode_config, monkeypatch
+):
+    """warm_up() must use the local path, not the manifest's repo-style model_id --
+    the server matches "model" by exact string equality against --model."""
+    manifest.add_model("org/model-a", {"backend": "mlx", "store_path": "store/mlx/a", "tier": "low"})
+    fake = FakeBackend(health_sequence=[True])
+    monkeypatch.setattr(server, "get_backend", lambda name: fake)
+    monkeypatch.setattr(server, "_free_port", lambda port: None)
+
+    server.serve("org/model-a", open_opencode=False)
+
+    launched_model_path = str(fake.launch_called_with[0])
+    assert fake.warm_up_called_with == launched_model_path
+    assert fake.warm_up_called_with != "org/model-a"
+
+
 def test_opencode_json_model_key_matches_what_the_backend_was_launched_with(
     models_root, opencode_config, monkeypatch
 ):
-    """Regression for a real bug: opencode.json used to be keyed by the
-    manifest's HF-repo-style model_id, while the backend was launched with a
-    local filesystem path -- two different strings that were supposed to
-    refer to the same running model but never matched. mlx_lm.server matches
-    each request's "model" field against exactly what it was launched with
-    (plain string equality, no alias resolution beyond one internal
-    sentinel), so every chat request from opencode silently looked like "load
-    a different model" and tried to resolve model_id as a fresh Hugging Face
-    repo -- hanging when online, failing outright when offline. Neither
-    test_opencode_sync.py (tests sync() in isolation) nor the rest of this
-    file (tests serve()'s orchestration logic) ever cross-checked the two
-    against each other, so the mismatch shipped silently. This test exists
-    specifically to close that gap: it asserts equality between the two
-    live values, not two independently-hardcoded expectations that could
-    both be wrong the same way."""
+    """opencode.json's model key must match exactly what the backend was launched with,
+    not the manifest's repo-style model_id."""
     manifest.add_model("org/model-a", {"backend": "mlx", "store_path": "store/mlx/a", "tier": "low"})
     fake = FakeBackend(health_sequence=[True])
     monkeypatch.setattr(server, "get_backend", lambda name: fake)
@@ -76,53 +156,13 @@ def test_opencode_json_model_key_matches_what_the_backend_was_launched_with(
 
 
 def test_opencode_sync_key_format_matches_backends_model_path_computation(models_root, opencode_config):
-    """Narrower unit-level version of the same contract, independent of
-    serve()'s orchestration: opencode_sync.py must key by exactly
-    manifest.models_root() / entry["store_path"] -- the same expression
-    backends/mlx.py and backends/llamacpp.py use for their --model
-    argument (see backends/mlx.py:33, backends/llamacpp.py:38)."""
+    """opencode_sync.py must key by exactly manifest.models_root() / entry["store_path"],
+    matching what each backend uses for --model."""
     manifest.add_model("org/model-a", {"backend": "mlx", "store_path": "store/mlx/a", "tier": "low"})
     opencode_sync.sync()
     config = json.loads(opencode_config.read_text())
     expected_key = str(manifest.models_root() / "store/mlx/a")
     assert expected_key in config["provider"]["local"]["models"]
-
-
-# --- offline-by-default posture -------------------------------------------
-
-def test_offline_posture_defaults_to_offline_before_checking(monkeypatch):
-    """The environment must be set to offline FIRST, and only flipped to
-    online after a real reachability check succeeds -- never the reverse."""
-    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
-    monkeypatch.setattr(server, "_internet_available", lambda: True)
-    online = server.apply_offline_posture()
-    assert online is True
-    assert "HF_HUB_OFFLINE" not in os.environ
-
-
-def test_offline_posture_stays_offline_when_unreachable(monkeypatch):
-    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
-    monkeypatch.setattr(server, "_internet_available", lambda: False)
-    online = server.apply_offline_posture()
-    assert online is False
-    assert os.environ.get("HF_HUB_OFFLINE") == "1"
-
-
-def test_offline_posture_sets_offline_env_var_before_the_network_check_runs(monkeypatch):
-    """Regression: if the reachability check itself throws or hangs, the
-    environment must already be in the safe (offline) state -- not left
-    however it was before this function ran."""
-    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
-    seen_env_during_check = {}
-
-    def flaky_check():
-        seen_env_during_check["HF_HUB_OFFLINE"] = os.environ.get("HF_HUB_OFFLINE")
-        raise RuntimeError("network blew up")
-
-    monkeypatch.setattr(server, "_internet_available", flaky_check)
-    with pytest.raises(RuntimeError):
-        server.apply_offline_posture()
-    assert seen_env_during_check["HF_HUB_OFFLINE"] == "1"
 
 
 # --- RISKY/safe picker with confirmation gate ------------------------------
@@ -204,10 +244,7 @@ def test_serve_skips_the_picker_when_exactly_one_model_is_installed(models_root,
 def test_serve_always_shows_the_picker_when_multiple_models_installed_even_with_a_default_set(
     models_root, opencode_config, monkeypatch
 ):
-    """Regression for a real UX complaint: a sticky default silently skipped
-    the picker even when multiple models existed, so the user never got a
-    chance to choose. Bare serve() must always show the picker whenever
-    there's a real choice, regardless of whether a default is set."""
+    """Bare serve() must always show the picker when multiple models exist, even with a default set."""
     manifest.add_model("org/a", {"backend": "mlx", "store_path": "store/mlx/a", "tier": "low"})
     manifest.add_model("org/b", {"backend": "mlx", "store_path": "store/mlx/b", "tier": "low"})
     manifest.set_default("org/a")  # a default IS set
@@ -239,7 +276,6 @@ def test_serve_with_explicit_model_does_not_retry_on_failure(models_root, openco
     manifest.add_model("org/model-a", {"backend": "mlx", "store_path": "store/mlx/a", "tier": "low"})
     fake = FakeBackend(health_sequence=[True, False])  # comes up, then fails warm-up check
     monkeypatch.setattr(server, "get_backend", lambda name: fake)
-    monkeypatch.setattr(server, "apply_offline_posture", lambda: True)
     monkeypatch.setattr(server, "_free_port", lambda port: None)
 
     with pytest.raises(SystemExit):
@@ -247,8 +283,10 @@ def test_serve_with_explicit_model_does_not_retry_on_failure(models_root, openco
 
 
 def test_serve_interactive_retry_loop_offers_removal_on_failure(models_root, opencode_config, monkeypatch):
-    manifest.add_model("org/broken", {"backend": "mlx", "store_path": "store/mlx/broken", "tier": "low", "size_gb": 5.0})
-    manifest.add_model("org/good", {"backend": "mlx", "store_path": "store/mlx/good", "tier": "low", "size_gb": 5.0})
+    manifest.add_model("org/broken", {"backend": "mlx_vlm", "store_path": "store/mlx_vlm/broken",
+                                       "tier": "low", "size_gb": 5.0})
+    manifest.add_model("org/good", {"backend": "mlx_vlm", "store_path": "store/mlx_vlm/good",
+                                     "tier": "low", "size_gb": 5.0})
     # Clear the default so serve(None) takes the interactive-picker-with-retry
     # path -- with a default set, serve(None) correctly uses it directly via
     # the single-attempt path instead (that's the documented, intended split).

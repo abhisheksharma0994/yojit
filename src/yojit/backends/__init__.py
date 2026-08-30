@@ -2,10 +2,11 @@ from pathlib import Path
 
 from .base import Backend
 from .llamacpp import LlamaCppBackend
-from .mlx import MLXBackend
+from .mlx_vlm import MLXVLMBackend
 
+# Old "mlx" (mlx-lm) entries are migrated to "mlx_vlm" by manifest.load().
 REGISTRY: dict[str, Backend] = {
-    "mlx": MLXBackend(),
+    "mlx_vlm": MLXVLMBackend(),
     "llamacpp": LlamaCppBackend(),
 }
 

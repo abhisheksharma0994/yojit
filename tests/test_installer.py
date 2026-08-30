@@ -1,6 +1,6 @@
 import json
 
-from yojit import installer, manifest, opencode_sync
+from yojit import installer, manifest
 
 
 def _fake_snapshot_download(repo_id, allow_patterns, local_dir):
@@ -30,13 +30,17 @@ def test_install_mlx_writes_manifest_entry_and_syncs(models_root, opencode_confi
     assert "Installed org/fake-model-4bit" in result
     entry = manifest.get_model("org/fake-model-4bit")
     assert entry is not None
-    assert entry["backend"] == "mlx"
+    # mlx_vlm, not mlx: verified live to serve plain text-only models
+    # correctly too, plus it's the only one with real KV-cache-quant/
+    # context-enforcement flags -- see backends/mlx_vlm.py's docstring.
+    assert entry["backend"] == "mlx_vlm"
     assert entry["bits"] == 4  # parsed from the "-4bit" suffix
     assert entry["source_repo"] == "org/fake-model-4bit"
     assert entry["verified"] is False
 
     # discovery + opencode sync side effects must have run
-    assert (manifest.models_root() / "low" / "mlx").exists() or (manifest.models_root() / "medium" / "mlx").exists()
+    assert ((manifest.models_root() / "low" / "mlx_vlm").exists()
+            or (manifest.models_root() / "medium" / "mlx_vlm").exists())
     config = json.loads(opencode_config.read_text())
     # Keyed by the local path the backend actually launches with, not the
     # HF-repo-style model_id -- see opencode_sync.py's comment.
@@ -46,9 +50,7 @@ def test_install_mlx_writes_manifest_entry_and_syncs(models_root, opencode_confi
 
 
 def test_install_mlx_with_subfolder_uses_composite_model_id(models_root, opencode_config, mocker):
-    """Regression: multi-quant repos (like the Qwen3.8-Uncensored repo tonight)
-    install a specific subfolder and must be addressable as repo:subfolder,
-    not collide with a plain install of the same repo."""
+    """A multi-quant repo's subfolder install must be addressable as repo:subfolder."""
     mocker.patch("yojit.installer.snapshot_download", side_effect=_fake_snapshot_download)
 
     installer.install_mlx("org/multi-quant-repo", "4-bit", ram_gb=24.0)
@@ -99,3 +101,23 @@ def test_remove_deletes_store_files_and_manifest_entry_and_syncs(models_root, op
 def test_remove_nonexistent_model_reports_cleanly(models_root, opencode_config):
     result = installer.remove("org/never-installed")
     assert "not installed" in result
+
+
+def test_remove_deletes_a_single_gguf_file(models_root, opencode_config, mocker):
+    def fake_hf_hub_download(repo_id, filename, local_dir):
+        from pathlib import Path
+        p = Path(local_dir) / filename
+        p.write_bytes(b"GGUF" + b"0" * 1024)
+        return str(p)
+
+    mocker.patch("huggingface_hub.hf_hub_download", side_effect=fake_hf_hub_download)
+    installer.install_gguf("org/gguf-repo", "model-Q4_K_M.gguf", ram_gb=24.0)
+    entry = manifest.get_model("org/gguf-repo:Q4_K_M")
+    store_path = manifest.models_root() / entry["store_path"]
+    assert store_path.is_file()
+
+    result = installer.remove("org/gguf-repo:Q4_K_M")
+
+    assert "Removed" in result
+    assert not store_path.exists()
+    assert manifest.get_model("org/gguf-repo:Q4_K_M") is None

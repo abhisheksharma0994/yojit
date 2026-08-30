@@ -1,13 +1,10 @@
-"""Downloads models straight into store/<backend>/ (bypassing mlx_lm's own
-downloader and HF's cache-blob layer) so multi-quant repos never pull more
-than the one variant we actually want -- proven necessary tonight with the
-Qwen3.8-Uncensored repo, which bundles 2/4/6/8-bit builds as sibling
-subfolders of one repo."""
+"""Downloads models straight into store/<backend>/, bypassing HF's cache-blob
+layer, so multi-quant repos only pull the one variant we actually want."""
 from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
-from . import classify, discovery, gguf_meta, hf_explore, manifest, opencode_sync, specs
+from . import classify, discovery, gguf_meta, hf_explore, manifest, opencode_sync
 
 
 def _safe_name(repo_id: str) -> str:
@@ -21,14 +18,14 @@ def install_mlx(repo_id: str, subfolder: str | None, ram_gb: float) -> str:
     dest = root / dest_name
 
     allow_patterns = [f"{subfolder}/*"] if subfolder else None
-    downloaded_path = Path(snapshot_download(repo_id, allow_patterns=allow_patterns, local_dir=str(dest)))
+    snapshot_download(repo_id, allow_patterns=allow_patterns, local_dir=str(dest))
     leaf_dir = dest / subfolder if subfolder else dest
 
     tier, context, output, weight_gb = classify.classify_mlx_model(leaf_dir, ram_gb)
     bits = hf_explore.bit_width_from_name(repo_id) or hf_explore.bit_width_from_name(subfolder or "")
 
     entry = {
-        "backend": "mlx",
+        "backend": "mlx_vlm",
         "store_path": str(leaf_dir.relative_to(manifest.models_root())),
         "bits": bits,
         "size_gb": weight_gb,

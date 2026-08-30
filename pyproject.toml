@@ -18,6 +18,11 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-mock>=3.12",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "vulture>=2.11",
+    "radon>=6.0",
+    "xenon>=0.9",
 ]
 
 [project.scripts]
@@ -28,3 +33,21 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, import sort, pyupgrade, mccabe complexity, pylint-refactor
+select = ["E", "F", "I", "UP", "C90", "PLR0911", "PLR0912", "PLR0913", "PLR0915"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-args = 6  # Backend.launch()'s signature is shared across 3 implementations
+
+[tool.vulture]
+paths = ["src/yojit"]
+min_confidence = 80

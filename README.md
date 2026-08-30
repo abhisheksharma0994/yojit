@@ -8,7 +8,9 @@ One command to discover, install, run, and keep local LLMs (MLX + llama.cpp) wir
 - Auto-picks the best-fitting quantization for your exact machine, for both MLX and llama.cpp equally.
 - Searches Hugging Face, filters out non-chat models, and ranks by downloads plus agentic/tool-use signals.
 - Keeps opencode's model list in sync automatically and launches straight into it, bound to the right model.
-- Self-healing: installs missing prerequisites (`mlx-lm`, `llama-server`, `opencode`) on demand.
+- Self-healing: installs missing prerequisites (`mlx-vlm`, `llama-server`, `opencode`) on demand, into an isolated venv it owns (`~/.yojit/venv`) rather than system Python.
+- Every MLX-format model — vision or plain text, dense or MoE — is served by `mlx-vlm`, a single universal backend.
+- Per-model launch knobs LM Studio exposes in its Load panel — seed, KV-cache quantization, max concurrent predictions, context length — settable via `yojit config`.
 
 ## Prerequisites
 
@@ -16,7 +18,7 @@ Python 3.9+ and pipx. If you don't have them:
 ```bash
 brew install python3 pipx
 ```
-Everything else (`mlx-lm`, `llama-server`, `opencode`) is installed on demand by `yojit init` itself.
+Everything else (`mlx-vlm`, `llama-server`, `opencode`) is installed on demand by `yojit init` itself.
 
 ## Install and run
 
@@ -53,13 +55,13 @@ yojit serve
 
 ## Where models are stored
 
-When running from a dev checkout (this repo, installed editable), models live in `models/` right here in the repo — self-contained, gitignored so downloaded weights never get committed (only `models/.gitkeep` is tracked, to keep the folder present after a fresh clone).
+When running from a dev checkout, models live in `models/` in the repo — gitignored, so weights never get committed.
 
-If you install this as a real package (`pip`/`pipx` install of a built distribution rather than a git clone), there is no repo folder at runtime to default to. In that case you must set the location explicitly:
+If installed as a real package instead of a git clone, set the location explicitly:
 ```bash
 export YOJIT_HOME=/wherever/you/want
 ```
-Running any command without a detectable repo checkout and without this variable set fails with a clear error telling you to set it — it will never silently pick a location on your machine.
+Without a detectable repo checkout or this variable set, commands fail with a clear error rather than picking a location silently.
 
 ## Commands
 
@@ -70,6 +72,7 @@ Running any command without a detectable repo checkout and without this variable
 | `install <repo> [--bits N] [--file X.gguf]` | Install a specific model |
 | `list` | Show installed models, tiers, sizes, limits |
 | `use <model>` | Set the default model |
+| `config <model> [--seed N] [--kv-cache-quant X] [--kv-group-size N] [--quantized-kv-start N] [--max-concurrent-predictions N] [--context N]` | Set per-model launch knobs |
 | `serve [model] [--no-open]` | Launch a model (and opencode) |
 | `stop` / `status` | Server lifecycle |
 | `remove <model>` | Uninstall a model |
@@ -79,24 +82,43 @@ Running any command without a detectable repo checkout and without this variable
 
 ## Safety model
 
-Every installed model gets a `low`/`medium`/`high` tier based on what fraction of your *total* RAM its weights would occupy — not its absolute size. The same tier logic applies at any RAM size, from an 8GB machine to a 128GB one: `low` and `medium` are considered safe to serve; `high` is flagged RISKY in the `serve` picker and requires an explicit confirmation before launching.
+Every installed model gets a `low`/`medium`/`high` tier based on what fraction of your *total* RAM its weights would occupy — not its absolute size. `low`/`medium` are safe to serve; `high` is flagged RISKY in the `serve` picker and needs explicit confirmation.
 
-The dividing line (~50% of RAM) isn't a theoretical guess — it's empirical. It was found by testing MLX models on a 24GB Apple Silicon Mac: every model whose weights exceeded that line crashed with a Metal out-of-memory error, regardless of context size, while models comfortably under it were rock-solid. Because the rule is expressed as a fraction rather than a fixed GB number, that finding carries over to any RAM size. See `src/yojit/classify.py` for the exact math.
+The ~50% dividing line is empirical: models above it risk an OOM crash regardless of context size, while models comfortably under it run reliably. Since it's a fraction, not a fixed GB number, it holds at any RAM size. See `src/yojit/classify.py` for the exact math.
 
-The same 50% threshold is applied to llama.cpp as a conservative default, with the analogous safety flags in place (`--ctx-size`, `--mlock`, `--parallel 1`) — but llama.cpp's own memory behavior under real OOM pressure hasn't been independently stress-tested the way MLX's was. Treat the llama.cpp threshold as reasoned-by-analogy, not (yet) crash-verified on that backend specifically.
+The same threshold applies to llama.cpp as a conservative default, with its own equivalent safety flags (`--ctx-size`, `--mlock`, `--parallel 1`).
+
+## Model coverage: mlx-vlm is the only MLX backend
+
+Every MLX-format model — vision or plain text, dense or MoE — is served by `mlx-vlm`'s server. It's a strict superset of the older text-only `mlx-lm` server, with real CLI flags for KV-cache quantization, context-length caps, and max-concurrent-predictions that `mlx-lm` doesn't have — so there's no separate vision/text backend split anymore.
+
+The runtime installs into `~/.yojit/venv`, a venv yojit owns exclusively, never system or Homebrew-managed Python — keeping install/upgrade side effects fully contained.
+
+## Per-model settings (`yojit config`)
+
+Mirrors the knobs LM Studio exposes in its model Load panel:
+
+| Setting | MLX (`mlx-vlm`) | llama.cpp (GGUF) |
+|---|---|---|
+| Context length | `--max-kv-size`, real cap | `--ctx-size`, real cap |
+| KV-cache quantization | `--kv-bits` / `--kv-group-size` / `--quantized-kv-start` | `--cache-type-k` / `--cache-type-v` |
+| Max concurrent predictions | `--max-num-seqs` | `--parallel` |
+| Seed | per-request only, no launch flag | `--seed`, real launch flag |
+
+An override a model's current backend can't act on is simply inert, not an error. `yojit config <model>` with no flags prints the model's current overrides and context.
+
+**KV-cache quantization defaults are computed per model per machine, never hardcoded.** `classify.default_kv_cache_overrides()` works out the real bytes-per-token cost from the model's own architecture against this machine's real headroom, and picks the highest-precision bit-width that still fits. `yojit config` always wins when explicitly set.
 
 ## Backend parity (MLX vs. llama.cpp)
 
-MLX and llama.cpp are treated as first-class, symmetric citizens — not "MLX is the real one and llama.cpp is an afterthought":
+MLX and llama.cpp are treated as first-class, symmetric citizens:
 
-- **Quant/bit auto-selection**: MLX picks the largest bit-width repo variant that still fits comfortably (`hf_explore.pick_best_fit`); GGUF picks the largest `.gguf` file in a repo that still fits comfortably (`hf_explore.pick_best_gguf_file`) — same principle, backend-appropriate mechanism (bit-width label vs. real file size, since GGUF quant-naming conventions vary too much across converters to parse reliably).
-- **Architecture-aware context/output limits**: MLX reads `config.json`; GGUF parses the model's own binary header directly (`gguf_meta.py`) for real layer count, head count, and native context — not a guess.
-- **Prerequisite self-install**: `mlx-lm` via pip, `llama-server` via Homebrew, `opencode` via Homebrew on macOS — actually installed on demand, not just detected and printed. Non-macOS or no Homebrew gets a clear manual-install pointer instead of a guessed command. (This doesn't cover Python or `pip`/`pipx` themselves — by the time any `yojit` command runs, the tool is already installed, so those are moot at that point, not gaps.)
-- **`upgrade`**: upgrades both `mlx-lm` and `llama.cpp` when present, not just one.
-- **Memory-safety launch flags**: MLX uses `--prefill-step-size`/`--prompt-cache-bytes` (tuned against real Metal OOM crashes); llama.cpp uses `--ctx-size`/`--mlock`/`--parallel 1` (the last one pins llama-server to a single request slot — it defaults to 4, each with its own KV cache sized to `--ctx-size`, which would silently multiply real memory usage past what the RAM math assumed).
-- **All launch parameters are PC-spec-aware, for both backends**: every knob beyond context/output size is recomputed fresh from this machine's actual RAM headroom and CPU core count on every `serve` call (`classify.compute_launch_tuning`), never a fixed constant baked in for one developer's machine. Headroom (`RAM - model weight size - reserved OS memory`) is bucketed into tiers that scale prefill/batch chunking up as more memory is free to use, and down toward conservative values as it gets tight:
-  - **MLX**: `--prefill-step-size` (512-8192, larger prefill chunks are faster but need more headroom) and `--prompt-cache-bytes` (scales with headroom, floored/ceilinged to sane bounds) both scale with headroom; `--decode-concurrency`/`--prompt-concurrency` are pinned to 1 (no backend here has verified-safe concurrent-request memory accounting yet); `--max-tokens` enforces the computed output limit server-side.
-  - **llama.cpp**: `--threads` is CPU-core-count-minus-one (leaves a core for the OS); `--gpu-layers 999` forces full GPU offload; `--batch-size`/`--ubatch-size` scale with the same headroom tiers as MLX's prefill chunking, since they serve the same purpose (how much of the prompt gets processed per step).
+- **Quant/bit auto-selection**: MLX picks the largest bit-width variant that still fits comfortably; GGUF picks the largest `.gguf` file that fits, keyed on real file size since quant-naming conventions vary too much to parse.
+- **Architecture-aware context/output limits**: MLX reads `config.json`; GGUF parses the model's own binary header (`gguf_meta.py`) for real layer/head counts and native context.
+- **Prerequisite self-install**: `mlx-vlm` into yojit's isolated venv, `llama-server` and `opencode` via Homebrew — actually installed on demand, not just detected and printed.
+- **`upgrade`**: upgrades both `mlx-vlm` and `llama.cpp` when present.
+- **Memory-safety launch flags**: MLX uses `--prefill-step-size`/context caps; llama.cpp uses `--ctx-size`/`--mlock`/`--parallel 1` (pinned to one request slot, since each extra slot multiplies KV-cache memory use).
+- **All launch parameters are spec-aware, for both backends**: every knob beyond context/output is recomputed fresh from real RAM headroom and CPU core count on every `serve` call, never a fixed constant.
 
 ## Development
 
@@ -105,7 +127,7 @@ pip install -e ".[dev]"
 pytest -v
 ```
 
-The test suite (100+ tests) covers every module with mocked filesystem/network access — no test touches your real `~/Models` or `~/.config/opencode/opencode.json`. CI runs on every push via GitHub Actions across Linux and Apple Silicon runners.
+The test suite covers every module with mocked filesystem/network access — no test touches your real `~/Models` or `~/.config/opencode/opencode.json`. CI runs on every push via GitHub Actions across Linux and Apple Silicon runners.
 
 ## License
 

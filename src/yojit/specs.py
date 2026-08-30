@@ -18,14 +18,8 @@ class Specs:
 
 
 def cpu_cores() -> int:
-    """Total logical CPU count, via Python's portable os.cpu_count() rather
-    than platform-specific sysctl keys. Apple's performance/efficiency core
-    tier naming isn't stable across chip generations (confirmed via sysctl:
-    older Apple Silicon uses perflevel0="Performance"/perflevel1="Efficiency",
-    while M5 uses perflevel0="Super"/perflevel1="Performance") -- trying to
-    single out "the fast cores" by name would be fragile and generation-
-    dependent, so total logical core count is used as the portable signal."""
-    return os.cpu_count() or 4  # conservative fallback if genuinely undetectable
+    """Total logical CPU count -- portable across chip generations, unlike sysctl core-tier names."""
+    return os.cpu_count() or 4
 
 
 def _mac_chip_name() -> str:

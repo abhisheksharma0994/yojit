@@ -1,11 +1,5 @@
 """Shared prerequisite installation for things that aren't a model-serving
-backend (see backends/mlx.py and backends/llamacpp.py for those) but that
-`init` and `serve` both need available -- currently just opencode, the
-client that talks to whichever backend is running.
-
-This closes a real gap: the README promised "missing prerequisites are
-installed on demand," but opencode's absence was only ever detected and
-printed as a manual-install instruction, never actually installed.
+backend but that `init` and `serve` both need -- currently just opencode.
 """
 import platform
 import shutil
@@ -13,11 +7,7 @@ import subprocess
 
 
 def ensure_opencode_installed() -> bool:
-    """Returns True if opencode is available (already present, or just
-    installed successfully). Auto-install is currently only implemented for
-    macOS with Homebrew, matching how it was installed during this project's
-    own development -- other platforms get a clear manual-install pointer
-    instead of a guessed package-manager command that might be wrong."""
+    """Returns True if opencode is available. Auto-install is macOS/Homebrew only."""
     if shutil.which("opencode"):
         return True
 

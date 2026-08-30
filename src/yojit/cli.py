@@ -4,15 +4,24 @@ import shutil
 import subprocess
 import sys
 
-from . import classify, discovery, doctor, hf_explore, installer, manifest, opencode_sync, prereqs, server, specs
+from . import (
+    classify,
+    doctor,
+    hf_explore,
+    installer,
+    manifest,
+    mlx_env,
+    opencode_sync,
+    prereqs,
+    server,
+    specs,
+)
 
 
-def _suggest_model_for_ram(ram_gb: float, search_limit: int = 50, check_limit: int = 20) -> tuple[str | None, str | None]:
-    """Dynamically queries Hugging Face for the most-downloaded MLX models
-    and returns the highest-ranked one that fits comfortably (low/medium
-    tier) on this machine's RAM. No hardcoded model list -- this generalizes
-    to any hardware and stays current as new models are released, using the
-    exact same search/rank/fit pipeline `explore` uses."""
+def _suggest_model_for_ram(
+    ram_gb: float, search_limit: int = 50, check_limit: int = 20
+) -> tuple[str | None, str | None]:
+    """Returns the highest-ranked HF model that fits comfortably on this machine's RAM."""
     try:
         results = hf_explore.search(query=None, limit=search_limit)
     except Exception:
@@ -38,29 +47,10 @@ def _suggest_model_for_ram(ram_gb: float, search_limit: int = 50, check_limit: i
     return None, None
 
 
-def cmd_init(args):
-    s = specs.detect()
-    print(f"Detected: {s.chip}, {round(s.total_ram_gb)} GB RAM, {round(s.free_disk_gb)} GB free disk, "
-          f"Apple Silicon: {s.is_apple_silicon}")
-
-    manifest.models_root().mkdir(parents=True, exist_ok=True)
-    print(f"Models root: {manifest.models_root()}")
-
-    if s.is_apple_silicon and not shutil.which("mlx_lm.server"):
-        print("Installing mlx-lm...")
-        subprocess.run(["pip3", "install", "--break-system-packages", "--upgrade", "mlx-lm"], check=False)
-
-    prereqs.ensure_opencode_installed()
-
-    opencode_sync.sync()
-
-    if manifest.list_models():
-        print("\nInit complete. Run `yojit serve` when ready.")
-        return
-
+def _init_first_model(ram_gb: float) -> None:
     print(f"\nNo models installed yet. Checking Hugging Face for a model that fits your "
-          f"{round(s.total_ram_gb)}GB machine...")
-    suggested_repo, reason = _suggest_model_for_ram(s.total_ram_gb)
+          f"{round(ram_gb)}GB machine...")
+    suggested_repo, reason = _suggest_model_for_ram(ram_gb)
 
     if suggested_repo:
         print(f"Suggested: {suggested_repo}  ({reason})")
@@ -70,74 +60,97 @@ def cmd_init(args):
         prompt = "Paste a Hugging Face repo id to install, or press Enter to skip for now: "
 
     choice = input(prompt).strip()
-
     if choice.lower() in ("n", "no", "skip") or (not suggested_repo and choice == ""):
         print("\nSkipped. Run `yojit explore` or `yojit install <repo>` whenever you're ready.")
         return
 
     repo_to_install = suggested_repo if (choice == "" or choice.lower() == "y") and suggested_repo else choice
-    if not repo_to_install:
-        print("\nNo repo id given. Run `yojit explore` or `yojit install <repo>` whenever you're ready.")
-        return
-
     print(f"\nDownloading {repo_to_install}...")
-    _resolve_install(repo_to_install, None, None, s.total_ram_gb)
-
+    _resolve_install(repo_to_install, None, None, ram_gb)
     print("\nLaunching it now...")
     server.serve(None, open_opencode=True)
+
+
+def cmd_init(args):
+    s = specs.detect()
+    print(f"Detected: {s.chip}, {round(s.total_ram_gb)} GB RAM, {round(s.free_disk_gb)} GB free disk, "
+          f"Apple Silicon: {s.is_apple_silicon}")
+
+    manifest.models_root().mkdir(parents=True, exist_ok=True)
+    print(f"Models root: {manifest.models_root()}")
+
+    if s.is_apple_silicon and not mlx_env.is_installed("mlx_vlm"):
+        print("Installing mlx-vlm into yojit's isolated venv (~/.yojit/venv)...")
+        mlx_env.pip_install("mlx-vlm")
+
+    prereqs.ensure_opencode_installed()
+    opencode_sync.sync()
+
+    if manifest.list_models():
+        print("\nInit complete. Run `yojit serve` when ready.")
+        return
+    _init_first_model(s.total_ram_gb)
+
+
+def _resolve_gguf_install(repo_id: str, files: list[dict], gguf_file: str | None, ram_gb: float):
+    if not gguf_file:
+        best = hf_explore.pick_best_gguf_file(files, ram_gb)
+        if not best:
+            print(f"No .gguf file in {repo_id} fits comfortably on this {round(ram_gb)}GB machine.")
+            sys.exit(1)
+        gguf_file = best["path"]
+        size_gb = best["size"] / (1024 ** 3)
+        print(f"No --file given, auto-picked {gguf_file} ({size_gb:.1f} GB, best fit for your {round(ram_gb)}GB RAM)")
+    print(installer.install_gguf(repo_id, gguf_file, ram_gb))
+
+
+def _bit_subfolders(files: list[dict]) -> list[str]:
+    return sorted({f["path"].split("/")[0] for f in files if "/" in f["path"]
+                   and f["path"].split("/")[0].lower().endswith("bit")})
+
+
+def _install_matching_bits(repo_id: str, subfolders: list[str], bits: int, ram_gb: float) -> None:
+    match = next((s for s in subfolders if hf_explore.bit_width_from_name(s) == bits), None)
+    if not match:
+        print(f"No {bits}-bit variant found. Available: {subfolders}")
+        sys.exit(1)
+    print(installer.install_mlx(repo_id, match, ram_gb))
+
+
+def _install_largest_fitting_bits(repo_id: str, subfolders: list[str], ram_gb: float) -> None:
+    # Default to the largest bit-width that still lands in low/medium tier -- comfortable fit, not the tightest.
+    subfolders = sorted(subfolders, key=lambda name: hf_explore.bit_width_from_name(name) or 0, reverse=True)
+    print(f"Multiple quantizations available: {subfolders}")
+    print("Picking the largest one that still fits comfortably (use --bits N to override)...")
+    print(installer.install_mlx(repo_id, subfolders[0], ram_gb))
+
+
+def _resolve_mlx_install(repo_id: str, files: list[dict], bits: int | None, ram_gb: float):
+    root_has_weights = (any(f["path"] == "config.json" for f in files)
+                         and any(f["path"].endswith(".safetensors") for f in files))
+    if root_has_weights and bits is None:
+        print(installer.install_mlx(repo_id, None, ram_gb))
+        return
+
+    subfolders = _bit_subfolders(files)
+    if not subfolders:
+        if not root_has_weights:
+            print(f"Could not find MLX weights in {repo_id} (no root safetensors, no bit-suffixed subfolders).")
+            sys.exit(1)
+        print(installer.install_mlx(repo_id, None, ram_gb))
+    elif bits is not None:
+        _install_matching_bits(repo_id, subfolders, bits, ram_gb)
+    else:
+        _install_largest_fitting_bits(repo_id, subfolders, ram_gb)
 
 
 def _resolve_install(repo_id: str, bits: int | None, gguf_file: str | None, ram_gb: float):
     files = hf_explore.repo_files(repo_id)
     backend = hf_explore.detect_backend_from_files(files)
-
     if backend == "llamacpp" or gguf_file:
-        if not gguf_file:
-            best = hf_explore.pick_best_gguf_file(files, ram_gb)
-            if not best:
-                print(f"No .gguf file in {repo_id} fits comfortably on this {round(ram_gb)}GB machine.")
-                sys.exit(1)
-            gguf_file = best["path"]
-            size_gb = best["size"] / (1024 ** 3)
-            print(f"No --file given, auto-picked {gguf_file} "
-                  f"({size_gb:.1f} GB, best fit for your {round(ram_gb)}GB RAM)")
-        print(installer.install_gguf(repo_id, gguf_file, ram_gb))
-        return
-
-    # MLX: check for root-level safetensors, or subfolders (multi-quant repos
-    # like the one we handled manually tonight for Qwen3.8-Uncensored).
-    root_has_weights = any(f["path"] == "config.json" for f in files) and \
-        any(f["path"].endswith(".safetensors") for f in files)
-    if root_has_weights and bits is None:
-        print(installer.install_mlx(repo_id, None, ram_gb))
-        return
-
-    subfolders = sorted({f["path"].split("/")[0] for f in files if "/" in f["path"]
-                          and f["path"].split("/")[0].lower().endswith("bit")})
-    if not subfolders:
-        if root_has_weights:
-            print(installer.install_mlx(repo_id, None, ram_gb))
-            return
-        print(f"Could not find MLX weights in {repo_id} (no root safetensors, no bit-suffixed subfolders).")
-        sys.exit(1)
-
-    if bits is not None:
-        match = next((s for s in subfolders if s.lower().startswith(f"{bits}bit")), None)
-        if not match:
-            print(f"No {bits}-bit variant found. Available: {subfolders}")
-            sys.exit(1)
-        print(installer.install_mlx(repo_id, match, ram_gb))
-        return
-
-    # No explicit bits requested: default to the largest bit-width that still
-    # lands in low/medium tier -- comfortable fit, not the tightest possible.
-    def bits_of(name):
-        return hf_explore.bit_width_from_name(name) or 0
-
-    subfolders.sort(key=bits_of, reverse=True)
-    print(f"Multiple quantizations available: {subfolders}")
-    print("Picking the largest one that still fits comfortably (use --bits N to override)...")
-    print(installer.install_mlx(repo_id, subfolders[-1] if False else subfolders[0], ram_gb))
+        _resolve_gguf_install(repo_id, files, gguf_file, ram_gb)
+    else:
+        _resolve_mlx_install(repo_id, files, bits, ram_gb)
 
 
 def cmd_install(args):
@@ -184,6 +197,39 @@ def cmd_use(args):
     print(f"Default model set to {args.model}")
 
 
+def cmd_config(args):
+    """Sets per-model launch knobs (seed, KV-cache quant, concurrency, context).
+    An override the model's backend can't use is simply inert, not an error."""
+    entry = manifest.get_model(args.model)
+    if not entry:
+        print(f"{args.model} is not installed.")
+        sys.exit(1)
+
+    if not any([args.seed is not None, args.kv_cache_quant, args.max_concurrent_predictions is not None,
+                args.kv_group_size is not None, args.quantized_kv_start is not None, args.context is not None]):
+        print(f"Current overrides for {args.model}: {entry.get('overrides', {})}")
+        print(f"Current context: {entry.get('context')}")
+        return
+
+    if args.context is not None:
+        data = manifest.load()
+        data["models"][args.model]["context"] = args.context
+        manifest.save(data)
+
+    overrides = manifest.update_overrides(
+        args.model,
+        seed=args.seed,
+        kv_cache_quant=args.kv_cache_quant,
+        max_concurrent_predictions=args.max_concurrent_predictions,
+        kv_group_size=args.kv_group_size,
+        quantized_kv_start=args.quantized_kv_start,
+    )
+    print(f"Updated overrides for {args.model}: {overrides}")
+    if args.context is not None:
+        print(f"Context length set to {args.context}")
+    print("Takes effect on the next `yojit serve`.")
+
+
 def cmd_serve(args):
     server.serve(args.model, open_opencode=not args.no_open)
 
@@ -221,9 +267,9 @@ def cmd_doctor(args):
 def cmd_upgrade(args):
     print("Upgrading yojit...")
     subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "--break-system-packages", "yojit"])
-    if shutil.which("mlx_lm.server"):
-        print("Upgrading mlx-lm...")
-        subprocess.run(["pip3", "install", "--break-system-packages", "--upgrade", "mlx-lm"])
+    if mlx_env.venv_python().exists():
+        print("Upgrading mlx-vlm in yojit's isolated venv...")
+        mlx_env.pip_install("mlx-vlm", upgrade=True)
     if shutil.which("llama-server"):
         print("Upgrading llama.cpp...")
         subprocess.run(["brew", "upgrade", "llama.cpp"], check=False)
@@ -262,6 +308,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("model")
     p.set_defaults(func=cmd_use)
 
+    p = sub.add_parser("config", help="Set per-model launch knobs (seed, KV-cache quant, concurrency, context)")
+    p.add_argument("model")
+    p.add_argument("--seed", type=int, default=None, help="Fixed RNG seed (llama.cpp only; omit for random)")
+    p.add_argument("--kv-cache-quant", default=None,
+                    help="KV cache quantization: bit-width for mlx_vlm (e.g. 4, 8), "
+                         "quant type for llama.cpp (e.g. q8_0, q4_0)")
+    p.add_argument("--kv-group-size", type=int, default=None, help="KV cache quant group size (mlx_vlm only)")
+    p.add_argument("--quantized-kv-start", type=int, default=None,
+                    help="Token index KV quantization starts at (mlx_vlm only)")
+    p.add_argument("--max-concurrent-predictions", type=int, default=None,
+                    help="Max concurrent request slots (all backends; raising above 1 "
+                         "multiplies KV-cache memory use accordingly)")
+    p.add_argument("--context", type=int, default=None,
+                    help="Override the auto-computed context length for this model")
+    p.set_defaults(func=cmd_config)
+
     p = sub.add_parser("serve", help="Launch a model and opencode")
     p.add_argument("model", nargs="?", default=None)
     p.add_argument("--no-open", action="store_true", help="Don't auto-launch opencode")
@@ -287,5 +349,5 @@ def main(argv: list[str] | None = None):
     args.func(args)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()
