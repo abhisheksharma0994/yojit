@@ -145,9 +145,20 @@ theorem prefillStepSize_mono {h₁ h₂ : Nat} (h : h₁ ≤ h₂) :
 abbrev PROMPT_CACHE_MIN_UNITS : Nat := 50
 abbrev PROMPT_CACHE_MAX_UNITS : Nat := 800
 
+/-- `_PROMPT_CACHE_HEADROOM_FRACTION = 0.4`, as the exact ratio 2/5 it is used as.
+
+Named rather than inlined so the constant-mirror test can tie it to the Python
+float. It is the one tuning fraction that is *not* the `SAFETY_FACTOR` the KV
+budget uses, which is worth being able to see: two fractions of one headroom
+sizing two caches is the pattern that broke the install estimate. -/
+abbrev PROMPT_CACHE_FRACTION_NUM : Nat := 2
+abbrev PROMPT_CACHE_FRACTION_DENOM : Nat := 5
+
 /-- `min(8.0, max(0.5, headroom_gb * 0.4))`, in units of 0.01 GiB. -/
 def promptCacheUnits (h : Nat) : Nat :=
-  min PROMPT_CACHE_MAX_UNITS (max PROMPT_CACHE_MIN_UNITS (h * 2 / 5))
+  min PROMPT_CACHE_MAX_UNITS
+    (max PROMPT_CACHE_MIN_UNITS
+      (h * PROMPT_CACHE_FRACTION_NUM / PROMPT_CACHE_FRACTION_DENOM))
 
 /-- Never below the 0.5 GiB floor, never above the 8 GiB ceiling. -/
 theorem promptCacheUnits_bounds (h : Nat) :

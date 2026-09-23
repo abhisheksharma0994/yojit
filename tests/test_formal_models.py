@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import sys
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -181,6 +182,19 @@ _LEAN_CONSTANT_MIRROR = [
     ("MAX_OUTPUT_HARD_CAP", "MAX_OUTPUT_HARD_CAP", lambda v: v),
     ("MIN_OUTPUT", "MIN_OUTPUT", lambda v: v),
     ("CONTEXT_ROUND_TO", "CONTEXT_ROUND_TO", lambda v: v),
+    ("PROMPT_CACHE_MIN_UNITS", "_PROMPT_CACHE_BYTES_MIN_GB", lambda v: round(v * 100)),
+    ("PROMPT_CACHE_MAX_UNITS", "_PROMPT_CACHE_BYTES_MAX_GB", lambda v: round(v * 100)),
+]
+
+# The tuning TABLES, which decide every launch parameter. These are `def ... :
+# List Nat := [...]` in Lean, so the scalar regex above cannot see them -- and for
+# a while nothing did: `tables_match_bucket_count` proves the Lean tables are the
+# same LENGTH as each other, while nothing tied their *values* to classify.py.
+_LEAN_LIST_MIRROR = [
+    ("HEADROOM_TIER_CEILINGS", "_HEADROOM_TIER_GB", lambda v: round(v)),
+    ("prefillSizes", "_MLX_PREFILL_STEP_SIZES", lambda v: v),
+    ("batchSizes", "_LLAMACPP_BATCH_SIZES", lambda v: v),
+    ("ubatchSizes", "_LLAMACPP_UBATCH_SIZES", lambda v: v),
 ]
 
 
@@ -212,6 +226,48 @@ def test_lean_constants_match_the_python_source():
             f"{name} = {lean[name]} in Lean but classify.{py_attr} = {py_value} "
             f"(expected {expected}; update the Lean model to match the code)"
         )
+
+
+def _lean_lists() -> dict:
+    found = {}
+    for lean_file in LEAN_DIR.rglob("Yojit/*.lean"):
+        for name, body in re.findall(r"^def (\w+) : List Nat := \[([0-9, ]+)\]$",
+                                     lean_file.read_text(), re.M):
+            found[name] = [int(x) for x in body.split(",")]
+    return found
+
+
+def test_lean_tuning_tables_match_the_python_tables():
+    """The scalars were mirrored; the tables were not, and they are what actually
+    reaches a launch. A table edited in classify.py with the Lean copy left behind
+    keeps the build green while the model proves statements about numbers the code
+    no longer uses -- the same drift the scalar mirror exists to prevent."""
+    _require_model_files()
+    lean = _lean_lists()
+    assert lean, "no `def ... : List Nat := [...]` found -- did the Lean sources move?"
+
+    for name, py_attr, transform in _LEAN_LIST_MIRROR:
+        assert name in lean, f"Lean list {name} disappeared from formal/lean"
+        py_value = getattr(classify, py_attr)
+        expected = [transform(v) for v in py_value]
+        assert lean[name] == expected, (
+            f"{name} = {lean[name]} in Lean but classify.{py_attr} = {py_value} "
+            f"(expected {expected}; update the Lean model to match the code)"
+        )
+
+
+def test_lean_prompt_cache_fraction_matches_the_python_fraction():
+    """Compared as a ratio, not as two mirrored numbers: a mirror that hard-codes
+    the expected numerator would keep passing if the Python fraction changed."""
+    _require_model_files()
+    lean = _lean_abbrevs()
+    num, denom = lean["PROMPT_CACHE_FRACTION_NUM"], lean["PROMPT_CACHE_FRACTION_DENOM"]
+    actual = Fraction(num, denom)
+    expected = Fraction(str(classify._PROMPT_CACHE_HEADROOM_FRACTION))
+    assert actual == expected, (
+        f"Lean sizes the prompt cache at {num}/{denom} = {actual} of headroom but "
+        f"classify._PROMPT_CACHE_HEADROOM_FRACTION = {expected}"
+    )
 
 
 def test_lean_model_states_the_rules_the_python_actually_implements():

@@ -143,6 +143,29 @@ def test_compute_launch_tuning_prompt_cache_bytes_scales_with_headroom_not_fixed
     assert generous["prompt_cache_bytes"] <= classify._PROMPT_CACHE_BYTES_MAX_GB * 1024 ** 3
 
 
+# --- one headroom, every budget ----------------------------------------------
+
+@pytest.mark.parametrize("weight_gb, ram_gb", [(0.6, 8.0), (9.0, 16.0), (15.0, 24.0), (7.9, 24.0)])
+def test_every_budget_derives_from_the_same_headroom(weight_gb, ram_gb):
+    """The KV allowance and the launch tuning must read one headroom expression.
+
+    Two copies of `max(ram - weight - RESERVED_OS_GB, floor)` is the shape that let
+    the fit check reject the estimate's own context on a low-RAM machine; a third
+    copy feeding the tuning tables would be the same hazard one layer over."""
+    headroom = classify.headroom_gb(weight_gb, ram_gb)
+    assert headroom == max(ram_gb - weight_gb - classify.RESERVED_OS_GB,
+                           classify.MIN_HEADROOM_GB)
+
+    plan = classify.resolve_kv_cache(_KV_TEST_CFG, "mlx_vlm", weight_gb, ram_gb, 16384)
+    assert plan.headroom_bytes == int(classify.headroom_bytes(weight_gb, ram_gb))
+
+    tuning = classify.compute_launch_tuning(weight_gb, ram_gb, cpu_cores=8)
+    tier = classify._headroom_tier_index(headroom)
+    assert tuning["prefill_step_size"] == classify._MLX_PREFILL_STEP_SIZES[tier]
+    assert tuning["batch_size"] == classify._LLAMACPP_BATCH_SIZES[tier]
+    assert tuning["ubatch_size"] == classify._LLAMACPP_UBATCH_SIZES[tier]
+
+
 def test_compute_launch_tuning_threads_leaves_one_core_for_the_os():
     tuning = classify.compute_launch_tuning(weight_gb=4.0, ram_gb=24.0, cpu_cores=8)
     assert tuning["threads"] == 7

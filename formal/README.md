@@ -289,9 +289,11 @@ instead of the user's launch.
   difference, but a theorem about float rounding does not exist here.
 - **Spec-to-code correspondence.** Lean proves statements about the Lean model of
   `classify.py`; TLA+ checks a hand-written abstraction of the state writes. That
-  each faithfully represents the Python is asserted, not proved. The constant
-  mirror test makes that assertion mechanical for the numbers, which is the part
-  that actually drifts — but it is a test, not a proof.
+  each  faithfully represents the Python is asserted, not proved. The constant
+  mirror test makes that assertion mechanical for the scalars *and* the tuning
+  tables — the tables were unchecked until an audit looked for exactly this
+  pattern, because they are Lean `List`s and the scalar regex could not see them —
+  but it is a test, not a proof.
 - **Model checking is not proof.** TLC's results are "no counterexample in the
   explored state space" (state counts above, and the model is small by design —
   the point is the ownership and commit logic, not the load), not "no
@@ -301,6 +303,16 @@ instead of the user's launch.
   Those want integration tests and fault injection.
 - **Liveness.** Nothing here is checked under fairness: "a serve that is retried
   eventually succeeds" is not a property any of these specs state.
+- **Two launch parameters no launcher reads.** `compute_launch_tuning` returns
+  `prompt_cache_bytes` and `prompt_concurrency`; nothing consumes either.
+  `--prompt-cache-bytes` is not a flag in mlx_vlm 0.6.17 or 0.7.2 (both
+  `server/cli.py` flag lists were checked), and `MLXVLMBackend.launch` does not
+  pass it, so the tests and the three `promptCacheUnits*` theorems above describe a
+  budget that never reaches a command line. Worth noting for whoever wires it up:
+  it is sized at `0.4` of raw headroom with a 0.5 GiB floor, so on the floored
+  1.0 GiB headroom the floor alone is 50% of headroom and 75% combined with the KV
+  allowance — the one number here that would *not* respect the shared safety
+  factor.
 - **Client prompt size.** Nothing relates the window yojit picks to the size of
   the request a real client sends. The shrink that broke `e2e` was arithmetically
   correct against the budget it read; what no arithmetic here could know is that

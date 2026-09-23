@@ -104,16 +104,24 @@ def _kv_bytes_per_token_fp16(cfg: dict) -> float:
     return 2 * effective_layers * kv_heads * head_dim * 2  # K+V, fp16
 
 
-def headroom_bytes(weight_gb: float, ram_gb: float) -> float:
-    """Bytes this launch may spend on the KV cache: RAM left after the weights and
-    the OS reservation, floored, times the safety factor.
+def headroom_gb(weight_gb: float, ram_gb: float) -> float:
+    """RAM left for caches once the weights and the OS reservation are accounted
+    for, floored so a tight machine is not budgeted at zero.
 
-    The one budget behind both sizing decisions -- `estimate_limits_from_config`
-    picks a context against it and `resolve_kv_cache` checks that context against
-    it. Two copies of this arithmetic is what let a low-RAM machine be sized by
-    one and then rejected by the other."""
-    headroom_gb = max(ram_gb - weight_gb - RESERVED_OS_GB, MIN_HEADROOM_GB)
-    return headroom_gb * (1024 ** 3) * SAFETY_FACTOR
+    Mirror of `headroomUnits` in formal/lean/Yojit/Limits.lean, and the only place
+    this expression may live. Everything derived from headroom -- the KV-cache
+    allowance and the launch tuning alike -- reads it from here, so a changed floor
+    cannot leave one caller on the old one."""
+    return max(ram_gb - weight_gb - RESERVED_OS_GB, MIN_HEADROOM_GB)
+
+
+def headroom_bytes(weight_gb: float, ram_gb: float) -> float:
+    """Bytes this launch may spend on the KV cache: `headroom_gb` times the safety
+    factor. `estimate_limits_from_config` sizes a context against it and
+    `resolve_kv_cache` checks that context against it -- one budget, two decisions.
+    Two copies of this arithmetic is what let a low-RAM machine be sized by one and
+    then rejected by the other."""
+    return headroom_gb(weight_gb, ram_gb) * (1024 ** 3) * SAFETY_FACTOR
 
 
 def estimate_limits_from_config(cfg: dict, weight_gb: float, ram_gb: float):
@@ -307,12 +315,12 @@ def compute_launch_tuning(weight_gb: float, ram_gb: float, cpu_cores: int) -> di
     """Every launch parameter, computed fresh from this machine's actual
     specs rather than fixed constants. Concurrency stays pinned to 1 until
     concurrent-request memory accounting is modeled explicitly."""
-    headroom_gb = max(ram_gb - weight_gb - RESERVED_OS_GB, MIN_HEADROOM_GB)
-    tier = _headroom_tier_index(headroom_gb)
+    headroom = headroom_gb(weight_gb, ram_gb)
+    tier = _headroom_tier_index(headroom)
 
     prompt_cache_gb = min(
         _PROMPT_CACHE_BYTES_MAX_GB,
-        max(_PROMPT_CACHE_BYTES_MIN_GB, headroom_gb * _PROMPT_CACHE_HEADROOM_FRACTION),
+        max(_PROMPT_CACHE_BYTES_MIN_GB, headroom * _PROMPT_CACHE_HEADROOM_FRACTION),
     )
 
     return {
