@@ -298,11 +298,6 @@ _MLX_PREFILL_STEP_SIZES = (512, 1024, 2048, 4096, 8192)
 _LLAMACPP_BATCH_SIZES = (512, 1024, 2048, 2048, 4096)
 _LLAMACPP_UBATCH_SIZES = (256, 512, 512, 1024, 2048)
 
-# Fraction of headroom reserved for MLX's KV-cache ceiling (--prompt-cache-bytes).
-_PROMPT_CACHE_HEADROOM_FRACTION = 0.4
-_PROMPT_CACHE_BYTES_MIN_GB = 0.5
-_PROMPT_CACHE_BYTES_MAX_GB = 8.0
-
 
 def _headroom_tier_index(headroom_gb: float) -> int:
     for i, ceiling in enumerate(_HEADROOM_TIER_GB):
@@ -314,21 +309,21 @@ def _headroom_tier_index(headroom_gb: float) -> int:
 def compute_launch_tuning(weight_gb: float, ram_gb: float, cpu_cores: int) -> dict:
     """Every launch parameter, computed fresh from this machine's actual
     specs rather than fixed constants. Concurrency stays pinned to 1 until
-    concurrent-request memory accounting is modeled explicitly."""
+    concurrent-request memory accounting is modeled explicitly.
+
+    Every key here is read by a backend. A `prompt_cache_bytes` budget used to be
+    computed here for `--prompt-cache-bytes`, a flag mlx_vlm's server has never
+    had (absent in 0.6.17 and 0.7.2), so it sized a ceiling that nothing could
+    apply -- and at 0.4 of raw headroom with a 0.5 GiB floor it would have been
+    the one budget not obeying SAFETY_FACTOR. Removed rather than left as a knob
+    that looks implemented."""
     headroom = headroom_gb(weight_gb, ram_gb)
     tier = _headroom_tier_index(headroom)
-
-    prompt_cache_gb = min(
-        _PROMPT_CACHE_BYTES_MAX_GB,
-        max(_PROMPT_CACHE_BYTES_MIN_GB, headroom * _PROMPT_CACHE_HEADROOM_FRACTION),
-    )
 
     return {
         # MLX
         "prefill_step_size": _MLX_PREFILL_STEP_SIZES[tier],
-        "prompt_cache_bytes": int(prompt_cache_gb * 1024 ** 3),
         "decode_concurrency": 1,
-        "prompt_concurrency": 1,
         # llama.cpp
         "threads": max(1, cpu_cores - 1),
         "ngl": 999,  # full GPU offload

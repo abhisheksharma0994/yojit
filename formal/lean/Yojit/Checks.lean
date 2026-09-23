@@ -40,5 +40,4 @@ import Yojit.Tuning
 #print axioms Yojit.legacy_plan_overshoots_at_project_test_parameters
 #print axioms Yojit.tierIndex_lt_table_length
 #print axioms Yojit.tables_match_bucket_count
-#print axioms Yojit.promptCacheUnits_bounds
 #print axioms Yojit.threads_le_cores

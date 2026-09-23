@@ -140,40 +140,15 @@ theorem prefillStepSize_mono {h₁ h₂ : Nat} (h : h₁ ≤ h₂) :
     prefillStepSize (headroomTierIndex h₁) ≤ prefillStepSize (headroomTierIndex h₂) :=
   prefillSize_mono (tierIndex_mono h) (tierIndex_le_four h₁) (tierIndex_le_four h₂)
 
-/-! ### `prompt_cache_bytes` -/
+/-! ### A removed budget: `prompt_cache_bytes`
 
-abbrev PROMPT_CACHE_MIN_UNITS : Nat := 50
-abbrev PROMPT_CACHE_MAX_UNITS : Nat := 800
-
-/-- `_PROMPT_CACHE_HEADROOM_FRACTION = 0.4`, as the exact ratio 2/5 it is used as.
-
-Named rather than inlined so the constant-mirror test can tie it to the Python
-float. It is the one tuning fraction that is *not* the `SAFETY_FACTOR` the KV
-budget uses, which is worth being able to see: two fractions of one headroom
-sizing two caches is the pattern that broke the install estimate. -/
-abbrev PROMPT_CACHE_FRACTION_NUM : Nat := 2
-abbrev PROMPT_CACHE_FRACTION_DENOM : Nat := 5
-
-/-- `min(8.0, max(0.5, headroom_gb * 0.4))`, in units of 0.01 GiB. -/
-def promptCacheUnits (h : Nat) : Nat :=
-  min PROMPT_CACHE_MAX_UNITS
-    (max PROMPT_CACHE_MIN_UNITS
-      (h * PROMPT_CACHE_FRACTION_NUM / PROMPT_CACHE_FRACTION_DENOM))
-
-/-- Never below the 0.5 GiB floor, never above the 8 GiB ceiling. -/
-theorem promptCacheUnits_bounds (h : Nat) :
-    PROMPT_CACHE_MIN_UNITS ≤ promptCacheUnits h ∧ promptCacheUnits h ≤ PROMPT_CACHE_MAX_UNITS := by
-  constructor
-  · show (50 : Nat) ≤ promptCacheUnits h
-    unfold promptCacheUnits
-    exact Nat.le_min.mpr ⟨(by omega : (50 : Nat) ≤ 800), Nat.le_max_left _ _⟩
-  · unfold promptCacheUnits
-    exact Nat.min_le_left _ _
-
-theorem promptCacheUnits_mono {h₁ h₂ : Nat} (h : h₁ ≤ h₂) :
-    promptCacheUnits h₁ ≤ promptCacheUnits h₂ := by
-  unfold promptCacheUnits
-  exact min_mono_right (max_mono_right (Nat.div_le_div_right (Nat.mul_le_mul_right 2 h)))
+This file used to model a `--prompt-cache-bytes` ceiling -- `min(8.0, max(0.5,
+headroom_gb * 0.4))`, with `promptCacheUnits_bounds` and `promptCacheUnits_mono`
+proving its window and its monotonicity. The flag does not exist in mlx_vlm's
+server (checked at 0.6.17 and 0.7.2), and nothing in `src/yojit` ever passed it,
+so the theorems were about a budget that could not reach a command line. Deleting
+the budget was the honest fix; the proofs went with it, because a theorem about
+dead code is worse than no theorem -- it reads as coverage. -/
 
 /-! ### `threads` -/
 

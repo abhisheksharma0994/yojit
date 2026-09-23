@@ -130,17 +130,16 @@ def test_compute_launch_tuning_pins_concurrency_to_one_regardless_of_headroom():
     """No concurrency knob scales up, even with abundant headroom."""
     tuning = classify.compute_launch_tuning(weight_gb=4.0, ram_gb=128.0, cpu_cores=16)
     assert tuning["decode_concurrency"] == 1
-    assert tuning["prompt_concurrency"] == 1
 
 
-def test_compute_launch_tuning_prompt_cache_bytes_scales_with_headroom_not_fixed():
-    """Must scale with real headroom, within sane min/max bounds, not a fixed constant."""
-    tight = classify.compute_launch_tuning(weight_gb=15.0, ram_gb=24.0, cpu_cores=8)
-    generous = classify.compute_launch_tuning(weight_gb=4.0, ram_gb=64.0, cpu_cores=8)
-    assert tight["prompt_cache_bytes"] < generous["prompt_cache_bytes"]
-    # never below the floor or above the ceiling, regardless of headroom
-    assert classify._PROMPT_CACHE_BYTES_MIN_GB * 1024 ** 3 <= tight["prompt_cache_bytes"]
-    assert generous["prompt_cache_bytes"] <= classify._PROMPT_CACHE_BYTES_MAX_GB * 1024 ** 3
+def test_compute_launch_tuning_returns_only_keys_a_backend_reads():
+    """Every key must be consumed by a launch. `prompt_cache_bytes` and
+    `prompt_concurrency` were not: the first sized a `--prompt-cache-bytes` flag
+    mlx_vlm's server does not have, and no code read the second, so both were
+    budgets that looked implemented and reached no command line."""
+    tuning = classify.compute_launch_tuning(weight_gb=15.0, ram_gb=24.0, cpu_cores=8)
+    assert set(tuning) == {"prefill_step_size", "decode_concurrency",
+                           "threads", "ngl", "batch_size", "ubatch_size"}
 
 
 # --- one headroom, every budget ----------------------------------------------

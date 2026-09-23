@@ -21,7 +21,6 @@ import re
 import shutil
 import subprocess
 import sys
-from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -182,8 +181,6 @@ _LEAN_CONSTANT_MIRROR = [
     ("MAX_OUTPUT_HARD_CAP", "MAX_OUTPUT_HARD_CAP", lambda v: v),
     ("MIN_OUTPUT", "MIN_OUTPUT", lambda v: v),
     ("CONTEXT_ROUND_TO", "CONTEXT_ROUND_TO", lambda v: v),
-    ("PROMPT_CACHE_MIN_UNITS", "_PROMPT_CACHE_BYTES_MIN_GB", lambda v: round(v * 100)),
-    ("PROMPT_CACHE_MAX_UNITS", "_PROMPT_CACHE_BYTES_MAX_GB", lambda v: round(v * 100)),
 ]
 
 # The tuning TABLES, which decide every launch parameter. These are `def ... :
@@ -254,20 +251,6 @@ def test_lean_tuning_tables_match_the_python_tables():
             f"{name} = {lean[name]} in Lean but classify.{py_attr} = {py_value} "
             f"(expected {expected}; update the Lean model to match the code)"
         )
-
-
-def test_lean_prompt_cache_fraction_matches_the_python_fraction():
-    """Compared as a ratio, not as two mirrored numbers: a mirror that hard-codes
-    the expected numerator would keep passing if the Python fraction changed."""
-    _require_model_files()
-    lean = _lean_abbrevs()
-    num, denom = lean["PROMPT_CACHE_FRACTION_NUM"], lean["PROMPT_CACHE_FRACTION_DENOM"]
-    actual = Fraction(num, denom)
-    expected = Fraction(str(classify._PROMPT_CACHE_HEADROOM_FRACTION))
-    assert actual == expected, (
-        f"Lean sizes the prompt cache at {num}/{denom} = {actual} of headroom but "
-        f"classify._PROMPT_CACHE_HEADROOM_FRACTION = {expected}"
-    )
 
 
 def test_lean_model_states_the_rules_the_python_actually_implements():

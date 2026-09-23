@@ -101,7 +101,6 @@ about shipped code is the constant mirror; the rest are checks on the models.
 | `kvStart_lt_requested_context_of_not_fp16_fits` | when fp16 does not fit, the start index is below the requested context |
 | `tierIndex_le_four`, `tierIndex_lt_table_length` | the tuning tables are never indexed out of bounds |
 | `tierIndex_mono`, `prefillStepSize_mono` | chunking is monotone in RAM headroom |
-| `promptCacheUnits_bounds` | `--prompt-cache-bytes` stays within its 0.5-8 GiB window |
 | `threads_ge_one`, `threads_le_cores` | one core is left for the OS, single-core still gets one |
 | `fits_redundant_above_16gib` | above 16 GiB, `low`/`medium` already implies `fits_at_all` |
 | `fits_does_not_imply_safe` | `fits_at_all` and the tier test are genuinely different notions |
@@ -256,9 +255,9 @@ written to fail rather than to pass.
 
 - The README says "every knob beyond context/output is recomputed fresh from real
   RAM headroom and CPU core count on every `serve` call, never a fixed constant".
-  `ngl = 999`, `decode_concurrency = 1`, and `prompt_concurrency = 1` are literal
-  constants (`ngl_is_not_spec_derived`). The source comments say this is
-  deliberate, so the README sentence is the thing that overstates.
+  `ngl = 999` and `decode_concurrency = 1` are literal constants
+  (`ngl_is_not_spec_derived`). The source comments say this is deliberate, so the
+  README sentence is the thing that overstates.
 - The README's "~50% dividing line" describes the tier test. `fits_at_all` uses a
   different notion (a flat 8 GiB reserve), and the two disagree:
   `fits_does_not_imply_safe` exhibits a 50 GiB model on 60 GiB of RAM that passes
@@ -303,16 +302,17 @@ instead of the user's launch.
   Those want integration tests and fault injection.
 - **Liveness.** Nothing here is checked under fairness: "a serve that is retried
   eventually succeeds" is not a property any of these specs state.
-- **Two launch parameters no launcher reads.** `compute_launch_tuning` returns
-  `prompt_cache_bytes` and `prompt_concurrency`; nothing consumes either.
+- **One budget was deleted, not fixed.** `compute_launch_tuning` used to return
+  `prompt_cache_bytes` and `prompt_concurrency` and nothing consumed either:
   `--prompt-cache-bytes` is not a flag in mlx_vlm 0.6.17 or 0.7.2 (both
-  `server/cli.py` flag lists were checked), and `MLXVLMBackend.launch` does not
-  pass it, so the tests and the three `promptCacheUnits*` theorems above describe a
-  budget that never reaches a command line. Worth noting for whoever wires it up:
-  it is sized at `0.4` of raw headroom with a 0.5 GiB floor, so on the floored
-  1.0 GiB headroom the floor alone is 50% of headroom and 75% combined with the KV
-  allowance — the one number here that would *not* respect the shared safety
-  factor.
+  `server/cli.py` flag lists were checked) and `MLXVLMBackend.launch` never passed
+  it, so the tests and the three `promptCacheUnits*` theorems described a budget
+  that could not reach a command line. It was sized at `0.4` of raw headroom with a
+  0.5 GiB floor — the one number here that would *not* have obeyed the shared
+  safety factor: on the floored 1.0 GiB headroom the floor alone is 50% of
+  headroom, 75% combined with the KV allowance. Both keys and their theorems are
+  gone, and `test_compute_launch_tuning_returns_only_keys_a_backend_reads` now
+  fails if a key a backend never reads reappears.
 - **Client prompt size.** Nothing relates the window yojit picks to the size of
   the request a real client sends. The shrink that broke `e2e` was arithmetically
   correct against the budget it read; what no arithmetic here could know is that
