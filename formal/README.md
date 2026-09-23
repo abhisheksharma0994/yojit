@@ -95,6 +95,8 @@ about shipped code is the constant mirror; the rest are checks on the models.
 | `kvPlanContext_fits_headroom` | whenever one token fits, the reported context fits the headroom |
 | `kvStartClamped_le_context` | `quantized_kv_start` is a valid index into the window launched with |
 | `plan_at_project_test_parameters`, `plan_fits_at_project_test_parameters` | the project's own test parameters now yield a context that fits, with `legacy_plan_overshoots_at_project_test_parameters` proved as the contrast |
+| `plan_keeps_the_estimate` | the estimate's own context fits the budget that chose it — no shrink, no rounding — unless memory cannot afford `MIN_CONTEXT` at all |
+| `kvMaxTokens_ge_div`, `kvBytesPerToken_le_self` | a quantized cache is never narrower than the unquantized bound it was chosen from |
 | `kvBits_mem`, `kvBits_mono_headroom` | KV quantization is one of 16/8/4, monotone in headroom |
 | `kvStart_lt_requested_context_of_not_fp16_fits` | when fp16 does not fit, the start index is below the requested context |
 | `tierIndex_le_four`, `tierIndex_lt_table_length` | the tuning tables are never indexed out of bounds |
@@ -190,7 +192,7 @@ record — and all four invariants hold (`ForeignListenerNeverKilled`,
 `DefaultMatchesAdvertised` is deliberately the same invariant name that the
 pre-fix spec violates.
 
-## Two things the work on the fixes turned up
+## Three things the work on the fixes turned up
 
 ### The `quantized_kv_start` clamp is *not* provably dead (corrected)
 
@@ -208,6 +210,36 @@ guarantee is stated as a theorem in its own right
 (`kvStartClamped_le_context`) rather than inferred from the fp16 argument. The
 `min(start, effective_context)` in `classify.py` carries this reasoning in a
 comment.
+
+### The install estimate and the KV fit check read different headroom
+
+Found by CI's `e2e` job, and the only defect in this document that reached a
+user-visible failure.
+
+`estimate_limits_from_config` sized the context against
+`max(ram - weight - RESERVED_OS_GB, MIN_HEADROOM_GB)` — a 1.0 GiB floor — while
+`resolve_kv_cache` checked that context against its own `max(..., 0.1)` floor. On
+any machine whose RAM does not cover the weights plus the 8 GiB OS reservation
+those floors differ tenfold, so the check rejected the estimate *by
+construction* and the new shrink fired on every install.
+
+On the CI runner — 7 GB serving a 0.6 GB model, `f = 12288` bytes per token —
+the estimate chose 20480 tokens and the fit check cut the launched window to
+8192: `max(7 - 0.6 - 8, 0.1) * 2^30 * 0.25` is 26.8 MB, which is 8738 tokens at
+4 bits, rounded down to 8192. opencode's own request needs 9620 (7572 of system
+prompt plus a 2048 output budget), so every prompt came back `400 Bad Request:
+MAX_KV_SIZE is 8192` — a server that starts, reports itself healthy, and cannot
+answer a single question.
+
+**Fix.** One budget function, `headroom_bytes()`, read by both sizing decisions,
+with the 1.0 GiB floor as the only floor. `Kv.lean` now proves the property the
+split could not state: `plan_keeps_the_estimate` says handing the plan the
+estimate's own context is the identity, and its single hypothesis is the one case
+where a shrink is legitimate — memory that cannot afford `MIN_CONTEXT` at all,
+where the floor rather than memory set the context.
+`tests/test_classify.py` pins the same property for the real LFM2.5-1.2B config at
+7/8/8.6 GB, and the general invariant across a 131072- and a 12288-byte-per-token
+model. Both fail against the pre-fix code.
 
 ### A stale lock that cannot be deleted used to spin forever
 
@@ -269,6 +301,11 @@ instead of the user's launch.
   Those want integration tests and fault injection.
 - **Liveness.** Nothing here is checked under fairness: "a serve that is retried
   eventually succeeds" is not a property any of these specs state.
+- **Client prompt size.** Nothing relates the window yojit picks to the size of
+  the request a real client sends. The shrink that broke `e2e` was arithmetically
+  correct against the budget it read; what no arithmetic here could know is that
+  opencode's request is 9620 tokens. A unit test can pin the numbers, but only
+  the `e2e` job puts a real prompt through a real server.
 
 ## Layout
 

@@ -32,6 +32,9 @@ import Yojit.Tuning
 #print axioms Yojit.kvPlanContext_eq_requested_of_fits
 #print axioms Yojit.kvPlanContext_fits_headroom
 #print axioms Yojit.kvStartClamped_le_context
+#print axioms Yojit.kvBytesPerToken_le_self
+#print axioms Yojit.kvMaxTokens_ge_div
+#print axioms Yojit.plan_keeps_the_estimate
 #print axioms Yojit.plan_at_project_test_parameters
 #print axioms Yojit.plan_fits_at_project_test_parameters
 #print axioms Yojit.legacy_plan_overshoots_at_project_test_parameters

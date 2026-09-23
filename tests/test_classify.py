@@ -1,6 +1,8 @@
 """Regression fixtures from two real model architectures (a hybrid
 mamba/linear-attention model and a dense-ish MoE model), numbers verified
 against real server behavior -- re-verify against a real run before adjusting."""
+import pytest
+
 from yojit import classify
 
 RAM_GB = 24.0
@@ -242,8 +244,8 @@ def test_default_kv_cache_overrides_picks_8bit_when_that_fits_but_not_fp16(mocke
     """Must pick the highest-precision bit-width that actually fits, not jump straight to the most aggressive."""
     result = classify.default_kv_cache_overrides(_KV_TEST_CFG, "mlx_vlm", weight_gb=10.0, ram_gb=24.0, context=16384)
     assert result["kv_cache_quant"] == "8"
-    headroom_bytes = max(24.0 - 10.0 - classify.RESERVED_OS_GB, 0.1) * (1024 ** 3) * classify.SAFETY_FACTOR
-    assert result["quantized_kv_start"] == int(headroom_bytes / _KV_TEST_BYTES_PER_TOKEN_FP16)
+    assert result["quantized_kv_start"] == int(
+        classify.headroom_bytes(10.0, 24.0) / _KV_TEST_BYTES_PER_TOKEN_FP16)
 
 
 def test_default_kv_cache_overrides_falls_back_to_4bit_when_even_8bit_does_not_fit():
@@ -382,3 +384,54 @@ def test_kv_fit_limits_recomputes_the_output_for_the_shrunk_context():
     context, output = classify.kv_fit_limits(_KV_TEST_CFG, "mlx_vlm", 15.0, 24.0, 16384, 1024)
     assert (context, output) == (8192, 2048)
     assert 4 * output <= context
+
+
+# --- the estimate and the fit check share one headroom budget ----------------
+# Regression for a break the daily e2e job caught. The fit check used a 0.1 GiB
+# headroom floor while the estimate used 1.0 GiB, so on a machine smaller than
+# weights + RESERVED_OS_GB -- a 7 GB CI runner serving a 0.6 GB model -- the
+# estimate chose 20480 tokens and the check rejected it, installing and launching
+# an 8192 window. opencode's own request needs 9620 (7572 prompt + 2048 output),
+# so the server answered 400 to every prompt. Real config of
+# mlx-community/LFM2.5-1.2B-Instruct-4bit: 16 layers, 6 of them full attention,
+# 8 KV heads, hidden 2048 / 32 heads -> head_dim 64.
+_LFM25_CONFIG = {
+    "num_hidden_layers": 16, "num_attention_heads": 32, "num_key_value_heads": 8,
+    "hidden_size": 2048, "max_position_embeddings": 128000,
+    "layer_types": ["conv", "conv", "full_attention", "conv", "conv", "full_attention",
+                    "conv", "conv", "full_attention", "conv", "full_attention", "conv",
+                    "full_attention", "conv", "full_attention", "conv"],
+}
+_LFM25_BYTES_PER_TOKEN_FP16 = 2 * 6 * 8 * 64 * 2  # only the full-attention layers pay KV
+
+
+@pytest.mark.parametrize("ram_gb", [7.0, 8.0, 8.6])
+def test_the_fit_check_accepts_the_context_the_estimate_chose(ram_gb):
+    """Where both floors bind, the estimate and the check must still agree -- and
+    the window must stay big enough for a real client prompt (9620 tokens)."""
+    context, _ = classify.estimate_limits_from_config(_LFM25_CONFIG, 0.6, ram_gb)
+    plan = classify.resolve_kv_cache(_LFM25_CONFIG, "mlx_vlm", 0.6, ram_gb, context)
+    assert classify._kv_bytes_per_token_fp16(_LFM25_CONFIG) == _LFM25_BYTES_PER_TOKEN_FP16
+    assert context == 20480
+    assert plan.fits is True
+    assert plan.context == context
+    assert plan.context > 9620
+
+
+@pytest.mark.parametrize("ram_gb", [6.0, 7.0, 8.0, 12.0, 18.0, 24.0, 64.0])
+def test_the_plan_only_shrinks_a_context_memory_never_claimed(ram_gb):
+    """Feeding the plan the estimate's own context may only shrink it below
+    MIN_CONTEXT -- the case where MIN_CONTEXT, not memory, set the context. Any
+    other shrink means the two budgets have drifted apart again.
+
+    Both configs matter: the 0.1 GiB floor only diverged from the estimate on a
+    machine whose RAM does not cover the weights plus the OS reservation, and
+    whether that shrink stays above MIN_CONTEXT depends on the model's KV width."""
+    for cfg in (_KV_TEST_CFG, _LFM25_CONFIG):
+        for weight_gb in (0.6, 4.0, 9.0, 15.0, 30.0):
+            context, _ = classify.estimate_limits_from_config(cfg, weight_gb, ram_gb)
+            plan = classify.resolve_kv_cache(cfg, "mlx_vlm", weight_gb, ram_gb, context)
+            assert plan.fits or plan.context < classify.MIN_CONTEXT, (
+                f"weight={weight_gb} ram={ram_gb}: the estimate chose {context} tokens "
+                f"but the plan shrank it to {plan.context}"
+            )

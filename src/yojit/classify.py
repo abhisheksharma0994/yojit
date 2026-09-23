@@ -5,11 +5,17 @@ from pathlib import Path
 
 RESERVED_OS_GB = 8.0   # left for the OS and other apps
 SAFETY_FACTOR = 0.25   # stay well under raw headroom; prefill also spikes memory transiently
-# Named rather than inlined so formal/lean can mirror them: a bare `max(..., 1.0)`
+# Named rather than inlined so formal/lean can mirror it: a bare `max(..., 1.0)`
 # in the middle of an expression is a number the Lean model has no handle on, and
-# these two floors are what keeps a tight machine from being budgeted at zero.
+# this floor is what keeps a tight machine from being budgeted at zero.
+#
+# There is exactly ONE headroom floor. `resolve_kv_cache` used to carry its own
+# (0.1 GiB), smaller than the estimate's (1.0 GiB) -- so on a machine where
+# `ram - weight - RESERVED_OS_GB` is negative (a 7 GB Mac serving a 0.6 GB model,
+# say) the estimate chose a context under one budget and the fit check rejected it
+# under the other, shrinking every install to the smaller one. See
+# headroom_bytes(), the single budget both paths now share.
 MIN_HEADROOM_GB = 1.0
-KV_HEADROOM_FLOOR_GB = 0.1
 MIN_CONTEXT = 4096
 MAX_CONTEXT_HARD_CAP = 65536
 MAX_OUTPUT_HARD_CAP = 4096
@@ -98,6 +104,18 @@ def _kv_bytes_per_token_fp16(cfg: dict) -> float:
     return 2 * effective_layers * kv_heads * head_dim * 2  # K+V, fp16
 
 
+def headroom_bytes(weight_gb: float, ram_gb: float) -> float:
+    """Bytes this launch may spend on the KV cache: RAM left after the weights and
+    the OS reservation, floored, times the safety factor.
+
+    The one budget behind both sizing decisions -- `estimate_limits_from_config`
+    picks a context against it and `resolve_kv_cache` checks that context against
+    it. Two copies of this arithmetic is what let a low-RAM machine be sized by
+    one and then rejected by the other."""
+    headroom_gb = max(ram_gb - weight_gb - RESERVED_OS_GB, MIN_HEADROOM_GB)
+    return headroom_gb * (1024 ** 3) * SAFETY_FACTOR
+
+
 def estimate_limits_from_config(cfg: dict, weight_gb: float, ram_gb: float):
     """Core KV-cache-aware context/output estimate from an HF-style config dict."""
     tcfg = cfg.get("text_config", cfg)
@@ -105,10 +123,8 @@ def estimate_limits_from_config(cfg: dict, weight_gb: float, ram_gb: float):
     native_ctx = tcfg.get("max_position_embeddings") or cfg.get("max_position_embeddings") or 32768
     kv_bytes_per_token = _kv_bytes_per_token_fp16(cfg)
 
-    headroom_gb = max(ram_gb - weight_gb - RESERVED_OS_GB, MIN_HEADROOM_GB)
-    headroom_bytes = headroom_gb * (1024 ** 3) * SAFETY_FACTOR
-
-    max_ctx_by_mem = int(headroom_bytes / kv_bytes_per_token) if kv_bytes_per_token > 0 else native_ctx
+    headroom = headroom_bytes(weight_gb, ram_gb)
+    max_ctx_by_mem = int(headroom / kv_bytes_per_token) if kv_bytes_per_token > 0 else native_ctx
 
     # Memory floor never overrides the model's own native context ceiling.
     context = min(native_ctx, MAX_CONTEXT_HARD_CAP, max(MIN_CONTEXT, max_ctx_by_mem))
@@ -149,14 +165,6 @@ class KvPlan:
     headroom_bytes: int     # what was available to spend
 
 
-def _kv_headroom_bytes(weight_gb: float, ram_gb: float) -> float:
-    """Headroom this launch may spend on the KV cache, after the OS reservation
-    and the safety factor. Uses the KV floor rather than the general one: this is
-    the path where a tight machine still gets a (quantized) window."""
-    headroom_gb = max(ram_gb - weight_gb - RESERVED_OS_GB, KV_HEADROOM_FLOOR_GB)
-    return headroom_gb * (1024 ** 3) * SAFETY_FACTOR
-
-
 def _pick_kv_bits(context: int, bytes_per_token_fp16: float, headroom_bytes: float) -> int:
     """Highest precision from `_KV_QUANT_BIT_OPTIONS` whose cache fits `context`,
     falling back to the lowest option when nothing fits."""
@@ -179,7 +187,7 @@ def _fit_context(context: int, bytes_per_token: float, headroom_bytes: float) ->
     return int(effective), False
 
 
-def _kv_overrides(backend_name: str, bits: int, headroom_bytes: float,
+def _kv_overrides(backend_name: str, bits: int, headroom: float,
                   bytes_per_token_fp16: float, effective_context: int) -> dict:
     if backend_name == "llamacpp":
         return {"kv_cache_quant": _LLAMACPP_CACHE_TYPE_BY_BITS.get(bits, "q4_0")}
@@ -196,7 +204,7 @@ def _kv_overrides(backend_name: str, bits: int, headroom_bytes: float,
     # (formal/lean/Yojit/Kv.lean: kvStartClamped_le_context states the guarantee;
     #  kvStart_lt_requested_context_of_not_fp16_fits is why it usually changes
     #  nothing.)
-    start = int(headroom_bytes / bytes_per_token_fp16) if bytes_per_token_fp16 > 0 else 0
+    start = int(headroom / bytes_per_token_fp16) if bytes_per_token_fp16 > 0 else 0
     return {"kv_cache_quant": str(bits),
             "quantized_kv_start": max(0, min(start, effective_context))}
 
@@ -211,27 +219,27 @@ def resolve_kv_cache(cfg: dict, backend_name: str, weight_gb: float, ram_gb: flo
                       required_bytes=0, headroom_bytes=0)
 
     bytes_per_token_fp16 = _kv_bytes_per_token_fp16(cfg)
-    headroom_bytes = _kv_headroom_bytes(weight_gb, ram_gb)
+    headroom = headroom_bytes(weight_gb, ram_gb)
 
     # Unquantized already fits: no override, no shrink.
-    if bytes_per_token_fp16 <= 0 or context * bytes_per_token_fp16 <= headroom_bytes:
+    if bytes_per_token_fp16 <= 0 or context * bytes_per_token_fp16 <= headroom:
         return KvPlan(context=int(context), overrides={}, fits=True,
                       bytes_per_token=int(bytes_per_token_fp16),
                       required_bytes=int(context * bytes_per_token_fp16),
-                      headroom_bytes=int(headroom_bytes))
+                      headroom_bytes=int(headroom))
 
-    bits = _pick_kv_bits(context, bytes_per_token_fp16, headroom_bytes)
+    bits = _pick_kv_bits(context, bytes_per_token_fp16, headroom)
     bytes_per_token = bytes_per_token_fp16 * (bits / 16)
-    effective_context, fits = _fit_context(context, bytes_per_token, headroom_bytes)
+    effective_context, fits = _fit_context(context, bytes_per_token, headroom)
 
     return KvPlan(
         context=effective_context,
-        overrides=_kv_overrides(backend_name, bits, headroom_bytes, bytes_per_token_fp16,
+        overrides=_kv_overrides(backend_name, bits, headroom, bytes_per_token_fp16,
                                 effective_context),
         fits=fits,
         bytes_per_token=int(bytes_per_token),
         required_bytes=int(context * bytes_per_token),
-        headroom_bytes=int(headroom_bytes),
+        headroom_bytes=int(headroom),
     )
 
 

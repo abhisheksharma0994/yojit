@@ -228,6 +228,8 @@ def test_lean_model_states_the_rules_the_python_actually_implements():
         "context_bounds",
         "kvPlanContext_fits_headroom",            # the KV plan now reports a context that fits
         "kvStartClamped_le_context",
+        "plan_keeps_the_estimate",                # the estimate and the fit check share one budget
+        "kvMaxTokens_ge_div",
         "tier_trichotomy",
     ):
         assert f"theorem {theorem}" in sources, f"theorem {theorem} is gone from the Lean model"

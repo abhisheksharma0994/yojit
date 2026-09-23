@@ -135,8 +135,11 @@ theorem llamaCacheType_4 : llamaCacheType 4 = "q4_0" := by decide
 `tests/test_classify.py::test_default_kv_cache_overrides_falls_back_to_4bit_when_even_8bit_does_not_fit`
 uses a 32-layer / 8-KV-head / head_dim-128 model (so `f = 2*32*8*128*2 = 131072`)
 at `weight_gb=15`, `ram_gb=24`, `context=16384`.  Headroom is
-`max(24 - 15 - 8, 0.1) * 2^30 * 0.25 = 268435456` bytes.  At those exact inputs the
-4-bit cache does **not** fit, and the asserted output is still `"4"`. -/
+`max(24 - 15 - 8, 1.0) * 2^30 * 0.25 = 268435456` bytes (`MIN_HEADROOM_GB`; the
+floor that binds here is the shared estimate one, not the KV path's -- and
+`Kv.lean`'s `plan_keeps_the_estimate` below is why that sharing is now stated as
+a theorem).  At those exact inputs the 4-bit cache does **not** fit, and the
+asserted output is still `"4"`. -/
 
 theorem kv_overshoot_at_project_test_parameters :
     ¬ fitsKV 268435456 16384 131072 4 ∧ kvBits 268435456 16384 131072 = 4 := by
@@ -226,5 +229,69 @@ theorem plan_fits_at_project_test_parameters :
 2x overshoot the old return value shipped without comment. -/
 theorem legacy_plan_overshoots_at_project_test_parameters :
     ¬ (16384 * kvBytesPerToken 131072 4 ≤ 268435456) := by decide
+
+/-! ### The estimate and the fit check share one budget
+
+`classify.py` has one headroom function -- `headroom_bytes` -- and both sizing
+decisions read it: `estimate_limits_from_config` picks a context against it, and
+`resolve_kv_cache` checks that context against it.  That sharing is load-bearing
+and it was not always there: the fit check carried its own smaller floor, so on a
+machine whose RAM does not cover the weights plus `RESERVED_OS_GB` the estimate
+chose a window and the check rejected it, shrinking every install to the smaller
+budget.  Concretely, on a 7 GB machine serving a 0.6 GB model the estimate chose
+20480 tokens and the check cut the launched window to 8192, which is below the
+9620 tokens a real client request needed -- every prompt got a 400.
+
+The theorems below say the two cannot disagree again: whatever `context` returns
+fits the very budget it was chosen from.  The one exception is deliberate and
+lives in `plan_keeps_the_estimate`'s `hmin` hypothesis: when memory cannot afford
+`MIN_CONTEXT` at all, the floor -- not memory -- set the context, and the plan is
+allowed to come down. -/
+
+/-- `kvBytesPerToken` never exceeds the unquantized width. -/
+theorem kvBytesPerToken_le_self {f bits : Nat} (hb : bits ≤ 16) : kvBytesPerToken f bits ≤ f := by
+  unfold kvBytesPerToken
+  calc f * bits / 16 ≤ f * 16 / 16 := Nat.div_le_div_right (Nat.mul_le_mul_left f hb)
+    _ = f := Nat.mul_div_left f (by decide : 0 < 16)
+
+/-- A wider cache (more bytes per token) is never roomier: at any quantized width
+the chosen cache holds at least as many tokens as the estimate's own memory bound
+`h / f`. -/
+theorem kvMaxTokens_ge_div {h f bits : Nat}
+    (hkv : 1 ≤ kvBytesPerToken f bits) (hb : kvBytesPerToken f bits ≤ f) :
+    h / f ≤ kvMaxTokens h f bits := by
+  unfold kvMaxTokens
+  rw [if_neg (by omega : ¬ kvBytesPerToken f bits = 0)]
+  -- `a` (the dividend) is implicit and cannot be inferred from the hypotheses:
+  -- a bigger divisor only ever shrinks the quotient, whatever is being divided.
+  exact Nat.div_le_div_left (c := kvBytesPerToken f bits) (b := f) (a := h) hb
+    (by omega : 0 < kvBytesPerToken f bits)
+
+/-- **The estimate's own context fits the budget that chose it.**  Handing
+`context` to the plan is the identity -- no shrink, no rounding -- unless memory
+could not even afford `MIN_CONTEXT`.  This is exactly what failed before the two
+budgets were unified, and `tests/test_classify.py` pins the same property for the
+model the e2e job caught it on. -/
+theorem plan_keeps_the_estimate {w r kv native : Nat}
+    (hkv : 0 < kv) (hmin : MIN_CONTEXT ≤ maxCtxByMem w r kv native)
+    (hbits : 1 ≤ kvBytesPerToken kv (kvBits (headroomBytes w r) (context w r kv native) kv)) :
+    kvPlanContext (headroomBytes w r) (context w r kv native) kv = context w r kv native := by
+  refine kvPlanContext_eq_requested_of_fits ?_
+  have hmaxeq : max MIN_CONTEXT (maxCtxByMem w r kv native) = maxCtxByMem w r kv native :=
+    Nat.max_eq_right hmin
+  have hraw : contextRaw w r kv native ≤ maxCtxByMem w r kv native := by
+    have h1 : contextRaw w r kv native
+        ≤ min MAX_CONTEXT_HARD_CAP (max MIN_CONTEXT (maxCtxByMem w r kv native)) :=
+      Nat.min_le_right _ _
+    have h2 : min MAX_CONTEXT_HARD_CAP (max MIN_CONTEXT (maxCtxByMem w r kv native))
+        ≤ max MIN_CONTEXT (maxCtxByMem w r kv native) :=
+      Nat.min_le_right _ _
+    exact Nat.le_trans (Nat.le_trans h1 h2) (Nat.le_of_eq hmaxeq)
+  have hctx : context w r kv native ≤ maxCtxByMem w r kv native :=
+    Nat.le_trans (roundTo4096_le_self _) hraw
+  have hbudget : context w r kv native ≤ headroomBytes w r / kv := by
+    simpa only [maxCtxByMem, if_neg (by omega : ¬ kv = 0)] using hctx
+  exact Nat.le_trans hbudget
+    (kvMaxTokens_ge_div hbits (kvBytesPerToken_le_self (kvBits_le_16 _ _ _)))
 
 end Yojit
