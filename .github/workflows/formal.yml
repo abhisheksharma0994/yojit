@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
@@ -39,7 +39,7 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Cache elan toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.elan
           key: elan-${{ runner.os }}-${{ hashFiles('formal/lean/lean-toolchain') }}
@@ -53,7 +53,7 @@ jobs:
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
       - name: Cache Lean build output
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: formal/lean/.lake
           key: lake-${{ runner.os }}-${{ hashFiles('formal/lean/lean-toolchain', 'formal/lean/**/*.lean') }}
