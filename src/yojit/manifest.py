@@ -4,6 +4,8 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import locking
+
 SCHEMA_VERSION = 1
 
 MODELS_ROOT_ENV_VAR = "YOJIT_HOME"
@@ -61,40 +63,51 @@ def load() -> dict:
 
 
 def save(data: dict) -> None:
+    """Atomic: a reader never sees a truncated manifest, and a crash mid-write
+    cannot destroy the existing one."""
     models_root().mkdir(parents=True, exist_ok=True)
-    manifest_path().write_text(json.dumps(data, indent=2) + "\n")
+    locking.atomic_write_text(manifest_path(), json.dumps(data, indent=2) + "\n")
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# Every mutation below is one read-modify-write, so it holds the shared lock for
+# the whole thing -- otherwise two concurrent invocations each write back a
+# snapshot that predates the other's change, and one of them vanishes.
+# (formal/tla/OpencodeSync.tla is the counterexample for this exact shape.)
+
+
 def add_model(model_id: str, entry: dict) -> None:
-    data = load()
-    entry.setdefault("added_at", now_iso())
-    entry.setdefault("verified", False)
-    data.setdefault("models", {})[model_id] = entry
-    if not data.get("default_model"):
-        data["default_model"] = model_id
-    save(data)
+    with locking.state_lock():
+        data = load()
+        entry.setdefault("added_at", now_iso())
+        entry.setdefault("verified", False)
+        data.setdefault("models", {})[model_id] = entry
+        if not data.get("default_model"):
+            data["default_model"] = model_id
+        save(data)
 
 
 def remove_model(model_id: str) -> dict | None:
-    data = load()
-    entry = data.get("models", {}).pop(model_id, None)
-    if data.get("default_model") == model_id:
-        remaining = list(data.get("models", {}).keys())
-        data["default_model"] = remaining[0] if remaining else None
-    save(data)
-    return entry
+    with locking.state_lock():
+        data = load()
+        entry = data.get("models", {}).pop(model_id, None)
+        if data.get("default_model") == model_id:
+            remaining = list(data.get("models", {}).keys())
+            data["default_model"] = remaining[0] if remaining else None
+        save(data)
+        return entry
 
 
 def set_default(model_id: str) -> None:
-    data = load()
-    if model_id not in data.get("models", {}):
-        raise KeyError(f"{model_id} is not installed")
-    data["default_model"] = model_id
-    save(data)
+    with locking.state_lock():
+        data = load()
+        if model_id not in data.get("models", {}):
+            raise KeyError(f"{model_id} is not installed")
+        data["default_model"] = model_id
+        save(data)
 
 
 def get_default() -> str | None:
@@ -107,16 +120,17 @@ def get_model(model_id: str) -> dict | None:
 
 def update_overrides(model_id: str, **fields) -> dict:
     """Merges non-None fields into models[model_id]["overrides"] (per-model launch knobs)."""
-    data = load()
-    if model_id not in data.get("models", {}):
-        raise KeyError(f"{model_id} is not installed")
-    entry = data["models"][model_id]
-    overrides = entry.setdefault("overrides", {})
-    for key, value in fields.items():
-        if value is not None:
-            overrides[key] = value
-    save(data)
-    return overrides
+    with locking.state_lock():
+        data = load()
+        if model_id not in data.get("models", {}):
+            raise KeyError(f"{model_id} is not installed")
+        entry = data["models"][model_id]
+        overrides = entry.setdefault("overrides", {})
+        for key, value in fields.items():
+            if value is not None:
+                overrides[key] = value
+        save(data)
+        return overrides
 
 
 def list_models() -> dict:

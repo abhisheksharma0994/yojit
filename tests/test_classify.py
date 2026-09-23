@@ -262,3 +262,123 @@ def test_default_kv_cache_overrides_scales_with_more_ram_not_a_fixed_tier():
     roomy = classify.default_kv_cache_overrides(_KV_TEST_CFG, "mlx_vlm", weight_gb=15.0, ram_gb=128.0, context=16384)
     assert tight != {}
     assert roomy == {}
+
+
+# --- output budget: a strict quarter, with no MIN_OUTPUT floor ----------------
+# These pin the fix for the case the old floor got wrong: a context below
+# MIN_CONTEXT used to be handed MIN_OUTPUT (1024 = MIN_CONTEXT / 4) regardless of
+# how small the window actually was, so a 2048 window got half of itself as the
+# output budget. formal/lean/Yojit/Limits.lean states both formulas, and proves
+# the old one exceeds a quarter for every input below MIN_CONTEXT.
+
+def test_output_for_context_is_a_strict_quarter():
+    assert classify.output_for_context(4096) == 1024
+    assert classify.output_for_context(16384) == 4096
+    assert classify.output_for_context(32768) == 4096  # capped
+    assert classify.output_for_context(262144) == 4096  # still capped
+
+
+def test_output_for_context_below_min_context_is_not_floored_at_1024():
+    """The regression: 2048 // 4 = 512, not the old 1024."""
+    assert classify.output_for_context(2048) == 512
+    assert classify.output_for_context(1024) == 256
+
+
+def test_output_for_context_never_exceeds_a_quarter_of_the_window():
+    for context in list(range(4, 4096, 7)) + [4096, 8192, 20480, 65536, 100000]:
+        output = classify.output_for_context(context)
+        assert 4 * output <= context, f"context {context} got output {output}, more than a quarter"
+
+
+def test_output_for_context_is_never_zero_and_never_exceeds_the_window():
+    for context in range(1, 200):
+        output = classify.output_for_context(context)
+        assert output >= 1
+        assert output <= context
+
+
+def test_estimate_limits_uses_the_same_quarter_rule_for_a_tiny_native_context():
+    """End to end through estimate_limits_from_config: MIN_CONTEXT stays a floor
+    on the memory estimate but not on the model's own native ceiling, and the
+    output that comes back is a quarter of the context it reports."""
+    tiny = {"max_position_embeddings": 2048, "num_hidden_layers": 22,
+            "num_attention_heads": 32, "num_key_value_heads": 4, "hidden_size": 2048}
+    context, output = classify.estimate_limits_from_config(tiny, weight_gb=0.6, ram_gb=RAM_GB)
+    assert context == 2048
+    assert output == classify.output_for_context(2048) == 512
+
+
+# --- resolve_kv_cache: the plan reports a context it can actually hold -------
+
+def test_resolve_kv_cache_needs_no_override_when_fp16_fits():
+    plan = classify.resolve_kv_cache(_KV_TEST_CFG, "mlx_vlm", weight_gb=5.0, ram_gb=24.0, context=16384)
+    assert plan.fits is True
+    assert plan.overrides == {}
+    assert plan.context == 16384
+
+
+def test_resolve_kv_cache_shrinks_the_context_when_even_4bit_does_not_fit():
+    """The project's own test parameters. 16384 tokens at the 4-bit width needs
+    536870912 bytes against 268435456 of headroom; the plan stops claiming it fits
+    and reports the 8192 tokens that do."""
+    plan = classify.resolve_kv_cache(_KV_TEST_CFG, "mlx_vlm", weight_gb=15.0, ram_gb=24.0, context=16384)
+    assert plan.fits is False
+    assert plan.context == 8192
+    assert plan.bytes_per_token == 32768
+    assert plan.required_bytes == 16384 * 32768  # what was asked for
+    assert plan.headroom_bytes == 268435456
+    assert plan.context * plan.bytes_per_token <= plan.headroom_bytes  # what was granted
+
+
+def test_resolve_kv_cache_start_index_stays_inside_the_window_it_reports():
+    """quantized_kv_start is an index into the cache, so it must not point past
+    the window the plan reports (formal/lean/Yojit/Kv.lean: kvStartClamped_le_context)."""
+    plan = classify.resolve_kv_cache(_KV_TEST_CFG, "mlx_vlm", weight_gb=15.0, ram_gb=24.0, context=16384)
+    assert plan.overrides["quantized_kv_start"] <= plan.context
+
+
+def test_resolve_kv_cache_rounds_a_shrunk_context_down_to_4096():
+    """Headroom 1.25 GiB gives 10240 tokens at the 4-bit width; the reported
+    context rounds down to 8192 so every reported context is a 4096 multiple."""
+    plan = classify.resolve_kv_cache(_KV_TEST_CFG, "mlx_vlm", weight_gb=15.0, ram_gb=24.25, context=16384)
+    assert plan.fits is False
+    assert plan.context == 8192
+
+
+def test_resolve_kv_cache_keeps_the_context_when_only_the_precision_has_to_drop():
+    plan = classify.resolve_kv_cache(_KV_TEST_CFG, "mlx_vlm", weight_gb=10.0, ram_gb=24.0, context=16384)
+    assert plan.fits is True
+    assert plan.context == 16384
+    assert plan.overrides["kv_cache_quant"] == "8"
+
+
+def test_resolve_kv_cache_llamacpp_reports_cache_type_names():
+    plan = classify.resolve_kv_cache(_KV_TEST_CFG, "llamacpp", weight_gb=15.0, ram_gb=24.0, context=16384)
+    assert plan.overrides == {"kv_cache_quant": "q4_0"}
+    assert plan.context == 8192
+
+
+def test_resolve_kv_cache_passes_an_unsupported_backend_through_untouched():
+    plan = classify.resolve_kv_cache(_KV_TEST_CFG, "mlx", weight_gb=20.0, ram_gb=24.0, context=16384)
+    assert plan == classify.KvPlan(context=16384, overrides={}, fits=True,
+                                   bytes_per_token=0, required_bytes=0, headroom_bytes=0)
+
+
+def test_default_kv_cache_overrides_is_exactly_the_plans_overrides():
+    """The old entry point stays a thin wrapper, so the two cannot disagree."""
+    plan = classify.resolve_kv_cache(_KV_TEST_CFG, "mlx_vlm", weight_gb=15.0, ram_gb=24.0, context=16384)
+    assert classify.default_kv_cache_overrides(_KV_TEST_CFG, "mlx_vlm", 15.0, 24.0, 16384) == plan.overrides
+
+
+# --- kv_fit_limits: install-time application of the same rule ----------------
+
+def test_kv_fit_limits_leaves_a_fitting_config_alone():
+    assert classify.kv_fit_limits(_KV_TEST_CFG, "mlx_vlm", 5.0, 24.0, 16384, 4096) == (16384, 4096)
+
+
+def test_kv_fit_limits_recomputes_the_output_for_the_shrunk_context():
+    """Not just the context: the output budget has to follow it down, or the
+    manifest records a pair that no longer satisfies the quarter rule."""
+    context, output = classify.kv_fit_limits(_KV_TEST_CFG, "mlx_vlm", 15.0, 24.0, 16384, 1024)
+    assert (context, output) == (8192, 2048)
+    assert 4 * output <= context

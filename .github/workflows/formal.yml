@@ -1,0 +1,72 @@
+name: formal
+
+# The Lean and TLA+ models in formal/ are a regression barrier for rules that
+# tests can only sample: the tier partition, the context/output clamps, the
+# KV-cache fit arithmetic, and the concurrency in the state writes. They are the
+# reason a changed threshold in classify.py fails loudly instead of silently
+# invalidating a proof, so they get their own job rather than being skipped as
+# optional extras in the main test matrix.
+#
+# Kept separate from tests.yml's `test` job because it needs a Lean toolchain and
+# a JRE, which the matrix does not have -- and because a cold Lean build is
+# minutes, not seconds.
+on:
+  push:
+  pull_request:
+  workflow_dispatch: {}
+
+jobs:
+  models:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Turns the toolchain-missing skips in tests/test_formal_models.py into
+      # failures. Without this the whole job could quietly verify nothing.
+      YOJIT_REQUIRE_FORMAL: "1"
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install package with dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Cache elan toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ hashFiles('formal/lean/lean-toolchain') }}
+
+      - name: Install elan (pinned by formal/lean/lean-toolchain)
+        # --default-toolchain none: elan reads lean-toolchain from the project and
+        # fetches exactly that version on the first `lake build`, so the pinned
+        # version in the repo is what CI actually uses.
+        run: |
+          curl -fsSL https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Cache Lean build output
+        uses: actions/cache@v4
+        with:
+          path: formal/lean/.lake
+          key: lake-${{ runner.os }}-${{ hashFiles('formal/lean/lean-toolchain', 'formal/lean/**/*.lean') }}
+
+      - name: Fetch the pinned TLA+ tools jar (verified against its SHA-256)
+        run: formal/tools/fetch-tla2tools.sh
+
+      - name: Build the Lean development (proofs must be complete, no `sorry`)
+        run: |
+          cd formal/lean
+          lake build
+
+      - name: Run the formal-model tests
+        # Also runs the constant-mirror test, which is what keeps the Lean
+        # theorems attached to the numbers in classify.py.
+        run: pytest tests/test_formal_models.py -v

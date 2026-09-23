@@ -9,8 +9,6 @@ dist/
 .mypy_cache/
 .coverage
 htmlcov/
-.mutmut-cache
-mutants/
 *.log
 
 # Downloaded model weights + manifest live here for dev checkouts (see
@@ -20,3 +18,13 @@ models/*
 
 # Archived (out-of-rotation) model weights, moved aside but kept on disk
 models/archive/
+
+# Formal-methods artifacts. All three are generated: `lake build` writes the
+# build output and the (dependency-free) manifest on every run, the jar is a
+# 4.5 MB binary fetched and checksum-verified by formal/tools/fetch-tla2tools.sh,
+# and TLC drops a counterexample trace plus a state directory wherever it runs.
+.lake/
+formal/lean/lake-manifest.json
+formal/tools/*.jar
+formal/tla/states/
+formal/tla/*_TTrace_*

@@ -5,6 +5,25 @@ import pytest
 from yojit import manifest, opencode_sync, server
 
 
+@pytest.fixture(autouse=True)
+def _fake_pid_is_alive(monkeypatch):
+    """FakeBackend hands back a synthetic pid (4242), so `server.pid_alive` can
+    never be true for it. serve() re-validates that the recorded server is still
+    ours before handing off to opencode; these tests are about the orchestration,
+    so the liveness half is stubbed here and exercised for real by
+    test_serve_refuses_to_hand_off_when_the_server_died."""
+    monkeypatch.setattr(server, "pid_alive", lambda pid: True)
+
+
+def _stub_record(monkeypatch, model_id, pid=4242):
+    """For tests that stub `_attempt_launch` outright, so nothing ever writes a
+    record: make the handoff re-validation see the server the stub claims to have
+    started. Tests that exercise the real launch path get a real record instead."""
+    monkeypatch.setattr(server, "read_server_record", lambda: {
+        "pid": pid, "port": server.PORT, "model": model_id, "context": 4096, "output": 1024,
+    })
+
+
 class FakeBackend:
     """Stands in for a real Backend so tests never spawn a real process or
     hit a real port."""
@@ -230,9 +249,65 @@ def test_pick_model_interactive_blank_input_accepts_the_current_default(models_r
 
 # --- serve(): picker always shown when there's a real choice ---------------
 
+def test_serve_refuses_to_hand_off_after_another_process_replaced_the_server(
+    models_root, opencode_config, monkeypatch
+):
+    """The launch lock is released before the commit, so a second `yojit serve`
+    can replace our server in between. Handing opencode a dead endpoint is the
+    ReportedServerIsAlive failure from formal/tla/ServeLifecycle.tla."""
+    manifest.add_model("org/model-a", {"backend": "mlx", "store_path": "store/mlx/a", "tier": "low"})
+    fake = FakeBackend(health_sequence=[True])
+    monkeypatch.setattr(server, "get_backend", lambda name: fake)
+    monkeypatch.setattr(server, "_free_port", lambda port: None)
+    monkeypatch.setattr(server, "read_server_record", lambda: {
+        "pid": 999, "port": server.PORT, "model": "org/other", "context": 4096, "output": 1024,
+    })
+    launched = []
+    monkeypatch.setattr(server.subprocess, "run", lambda *a, **kw: launched.append(a))
+
+    with pytest.raises(SystemExit):
+        server.serve("org/model-a", open_opencode=True)
+
+    assert not any(c[0][0] == "opencode" for c in launched), f"opencode was launched: {launched}"
+
+
+def test_serve_refuses_to_hand_off_when_the_server_died(
+    models_root, opencode_config, monkeypatch
+):
+    """The record still names our model and pid, but the process is gone: the
+    record alone is not enough, which is why both halves are checked."""
+    manifest.add_model("org/model-a", {"backend": "mlx", "store_path": "store/mlx/a", "tier": "low"})
+    fake = FakeBackend(health_sequence=[True])
+    monkeypatch.setattr(server, "get_backend", lambda name: fake)
+    monkeypatch.setattr(server, "_free_port", lambda port: None)
+    monkeypatch.setattr(server, "pid_alive", lambda pid: False)
+
+    with pytest.raises(SystemExit):
+        server.serve("org/model-a", open_opencode=True)
+
+
+def test_serve_hands_off_when_the_record_still_names_our_server(
+    models_root, opencode_config, monkeypatch
+):
+    """The happy path, so the guard above is not passing by refusing everything."""
+    manifest.add_model("org/model-a", {"backend": "mlx", "store_path": "store/mlx/a", "tier": "low"})
+    fake = FakeBackend(health_sequence=[True])
+    monkeypatch.setattr(server, "get_backend", lambda name: fake)
+    monkeypatch.setattr(server, "_free_port", lambda port: None)
+    monkeypatch.setattr(server.prereqs, "ensure_opencode_installed", lambda: True)
+    launched = []
+    monkeypatch.setattr(server.subprocess, "run", lambda *a, **kw: launched.append(a))
+
+    server.serve("org/model-a", open_opencode=True)
+
+    assert any(c[0][0] == "opencode" for c in launched), f"opencode was never launched: {launched}"
+    assert server.read_server_record()["model"] == "org/model-a"
+
+
 def test_serve_skips_the_picker_when_exactly_one_model_is_installed(models_root, opencode_config, monkeypatch):
     manifest.add_model("org/only-one", {"backend": "mlx", "store_path": "store/mlx/a", "tier": "low"})
     monkeypatch.setattr(server, "_attempt_launch", lambda model_id: (True, 4242))
+    _stub_record(monkeypatch, "org/only-one")
     mock_pick = MockCounter()
     monkeypatch.setattr(server, "pick_model_interactive", mock_pick)
 
@@ -250,6 +325,7 @@ def test_serve_always_shows_the_picker_when_multiple_models_installed_even_with_
     manifest.set_default("org/a")  # a default IS set
 
     monkeypatch.setattr(server, "_attempt_launch", lambda model_id: (True, 4242))
+    _stub_record(monkeypatch, "org/b")
     mock_pick = MockCounter(return_value="org/b")
     monkeypatch.setattr(server, "pick_model_interactive", mock_pick)
 
@@ -303,6 +379,7 @@ def test_serve_interactive_retry_loop_offers_removal_on_failure(models_root, ope
         return True, 4242
 
     monkeypatch.setattr(server, "_attempt_launch", fake_attempt_launch)
+    _stub_record(monkeypatch, "org/good")
 
     pick_sequence = iter(["org/broken", "org/good"])
     monkeypatch.setattr(server, "pick_model_interactive", lambda: next(pick_sequence))

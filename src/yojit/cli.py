@@ -235,18 +235,34 @@ def cmd_serve(args):
 
 
 def cmd_stop(args):
-    pid = server._port_pid(server.PORT)
-    if not pid:
-        print("No server running.")
+    # Driven by the server record, so we only ever kill a process yojit started.
+    # Falling back to "whatever holds the port" kills unrelated services on 8080.
+    record = server.read_server_record()
+    pid = record.get("pid")
+    if not pid or not server.pid_alive(pid):
+        listener = server._port_pid(server.PORT)
+        if listener:
+            print(f"Port {server.PORT} is held by PID {listener}, which yojit did not start -- not touching it.")
+        else:
+            print("No server running.")
         return
     subprocess.run(["kill", str(pid)])
+    server.clear_server_record()
     print(f"Stopped PID {pid}")
 
 
 def cmd_status(args):
-    pid = server._port_pid(server.PORT)
-    if pid:
-        print(f"Server running on port {server.PORT}, PID {pid}")
+    record = server.read_server_record()
+    pid = record.get("pid")
+    if pid and server.pid_alive(pid):
+        print(
+            f"Server running on port {record.get('port', server.PORT)}, PID {pid}, "
+            f"model {record.get('model')}, context {record.get('context')}, output {record.get('output')}"
+        )
+        return
+    listener = server._port_pid(server.PORT)
+    if listener:
+        print(f"Port {server.PORT} is held by PID {listener}, which yojit did not start.")
     else:
         print("No server running.")
 

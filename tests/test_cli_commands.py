@@ -87,27 +87,57 @@ def test_cmd_serve_forwards_model_and_no_open_flag(mocker):
     mock_serve.assert_called_once_with("org/a", open_opencode=False)
 
 
-def test_cmd_stop_reports_when_nothing_running(mocker, capsys):
+def test_cmd_stop_reports_when_nothing_running(models_root, mocker, capsys):
     mocker.patch.object(cli.server, "_port_pid", return_value=None)
     cli.cmd_stop(_args())
     assert "No server running." in capsys.readouterr().out
 
 
-def test_cmd_stop_kills_the_running_pid(mocker, capsys):
-    mocker.patch.object(cli.server, "_port_pid", return_value=4242)
+def test_cmd_stop_kills_the_recorded_pid(models_root, mocker, capsys):
+    cli.server._record_server(4242, "org/a", 4096, 1024)
+    mocker.patch.object(cli.server, "pid_alive", return_value=True)
     mock_run = mocker.patch.object(cli.subprocess, "run")
     cli.cmd_stop(_args())
     mock_run.assert_called_once_with(["kill", "4242"])
     assert "Stopped PID 4242" in capsys.readouterr().out
+    assert cli.server.read_server_record() == {}
 
 
-def test_cmd_status_reports_running(mocker, capsys):
+def test_cmd_stop_leaves_a_foreign_listener_alone(models_root, mocker, capsys):
+    """A process on 8080 that yojit never started is not yojit's to kill."""
     mocker.patch.object(cli.server, "_port_pid", return_value=4242)
+    mock_run = mocker.patch.object(cli.subprocess, "run")
+    cli.cmd_stop(_args())
+    mock_run.assert_not_called()
+    assert "yojit did not start" in capsys.readouterr().out
+
+
+def test_cmd_stop_clears_a_record_whose_process_is_gone(models_root, mocker, capsys):
+    cli.server._record_server(4242, "org/a", 4096, 1024)
+    mocker.patch.object(cli.server, "pid_alive", return_value=False)
+    mocker.patch.object(cli.server, "_port_pid", return_value=None)
+    cli.cmd_stop(_args())
+    assert "No server running." in capsys.readouterr().out
+
+
+def test_cmd_status_reports_the_recorded_server(models_root, mocker, capsys):
+    cli.server._record_server(4242, "org/a", 2048, 512)
+    mocker.patch.object(cli.server, "pid_alive", return_value=True)
     cli.cmd_status(_args())
-    assert "PID 4242" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "PID 4242" in out
+    assert "org/a" in out
+    assert "context 2048" in out and "output 512" in out
 
 
-def test_cmd_status_reports_not_running(mocker, capsys):
+def test_cmd_status_reports_a_foreign_listener(models_root, mocker, capsys):
+    mocker.patch.object(cli.server, "_port_pid", return_value=4242)
+    mocker.patch.object(cli.server, "pid_alive", return_value=False)
+    cli.cmd_status(_args())
+    assert "yojit did not start" in capsys.readouterr().out
+
+
+def test_cmd_status_reports_not_running(models_root, mocker, capsys):
     mocker.patch.object(cli.server, "_port_pid", return_value=None)
     cli.cmd_status(_args())
     assert "No server running." in capsys.readouterr().out
